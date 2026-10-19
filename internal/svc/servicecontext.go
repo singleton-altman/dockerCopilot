@@ -1,13 +1,15 @@
 package svc
 
 import (
+	"sync"
+
 	"github.com/docker/docker/client"
 	"github.com/onlyLTY/dockerCopilot/internal/config"
 	"github.com/onlyLTY/dockerCopilot/internal/module"
 	"github.com/onlyLTY/dockerCopilot/internal/utiles/composefile"
+	"github.com/onlyLTY/dockerCopilot/internal/utiles/releasewatch"
 	"github.com/zeromicro/go-zero/core/logx"
 	"github.com/zeromicro/go-zero/rest"
-	"sync"
 )
 
 type ServiceContext struct {
@@ -23,6 +25,8 @@ type ServiceContext struct {
 	DockerClient               *client.Client
 	ComposeStore               *composefile.Store
 	ComposeExecutor            *composefile.Executor
+	ReleaseStore               *releasewatch.Store
+	ReleaseWatcher             *releasewatch.Watcher
 	mu                         sync.Mutex
 }
 
@@ -42,6 +46,11 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	if err != nil {
 		logx.Errorf("Unable to create docker client: %s", err)
 	}
+
+	releaseStore := releasewatch.NewStore(c.ReleaseWatchDataDir())
+	checker := releasewatch.NewChecker(releaseStore, c.ReleaseWatch.GitHubToken)
+	watcher := releasewatch.NewWatcher(checker, c.CheckInterval())
+
 	return &ServiceContext{
 		Config:          c,
 		HubImageInfo:    module.NewImageCheck(),
@@ -49,6 +58,8 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		DockerClient:    cli,
 		ComposeStore:    composefile.NewStore(c.ComposeDir()),
 		ComposeExecutor: composefile.NewExecutor(c.ComposeDir()),
+		ReleaseStore:    releaseStore,
+		ReleaseWatcher:  watcher,
 	}
 }
 

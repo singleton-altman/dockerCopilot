@@ -89,10 +89,14 @@ type ComposeJobReq struct {
 	JobID string `form:"jobId"`
 }
 
-type ContainerLogsReq struct {
+type ContainerLogsReq {
 	IdReq
 	Tail       int  `form:"tail,default=300"`
 	Timestamps bool `form:"timestamps,default=false"`
+}
+
+type ReleaseRepoReq struct {
+	Repo string `json:"repo"`
 }
 
 type ContainerRestoreReq {
@@ -262,6 +266,25 @@ service dockerCopilot {
 
 	@handler history
 	get /compose/history returns (Resp)
+}
+
+@server(
+	prefix: /api
+	group: releasewatch
+	jwt: Auth
+)
+service dockerCopilot {
+	@handler list
+	get /release/repos returns (Resp)
+
+	@handler add
+	post /release/repos (ReleaseRepoReq) returns (Resp)
+
+	@handler remove
+	delete /release/repos (ReleaseRepoReq) returns (Resp)
+
+	@handler check
+	post /release/check returns (Resp)
 }
 
 @server(

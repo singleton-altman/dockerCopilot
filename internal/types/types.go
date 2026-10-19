@@ -77,6 +77,10 @@ type ContainerLogsReq struct {
 	Timestamps bool `form:"timestamps,default=false"`
 }
 
+type ReleaseRepoReq struct {
+	Repo string `json:"repo"`
+}
+
 type LoginReq struct {
 	SecretKey string `form:"secretKey,optional"`
 }
