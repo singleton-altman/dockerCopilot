@@ -1,9 +1,11 @@
 package utiles
 
 import (
-	"github.com/onlyLTY/dockerCopilot/internal/svc"
+	"errors"
 	"os"
 	"path/filepath"
+
+	"github.com/onlyLTY/dockerCopilot/internal/svc"
 )
 
 func BackupList(ctx *svc.ServiceContext) ([]string, error) {
@@ -14,6 +16,10 @@ func BackupList(ctx *svc.ServiceContext) ([]string, error) {
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		// 还没有创建过任何备份时目录并不存在，这是正常状态而不是错误。
+		if errors.Is(err, os.ErrNotExist) {
+			return backupList, nil
+		}
 		return nil, err
 	}
 	for _, entry := range entries {

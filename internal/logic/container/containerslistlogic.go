@@ -2,8 +2,10 @@ package container
 
 import (
 	"context"
-	"github.com/onlyLTY/dockerCopilot/internal/utiles"
+	"strings"
 	"time"
+
+	"github.com/onlyLTY/dockerCopilot/internal/utiles"
 
 	"github.com/onlyLTY/dockerCopilot/internal/svc"
 	"github.com/onlyLTY/dockerCopilot/internal/types"
@@ -29,6 +31,18 @@ type Info struct {
 	// Compose 项目与服务的标签，非 compose 创建的容器为空。
 	ComposeProject string `json:"composeProject,omitempty"`
 	ComposeService string `json:"composeService,omitempty"`
+	// UsingImageIsID 为 true 表示 usingImage 只是镜像 ID（sha256:...），
+	// 无法从中推导出仓库名与标签。
+	UsingImageIsID bool `json:"usingImageIsID,omitempty"`
+}
+
+// isImageID 判断引用是否只是 `sha256:...` 形式的镜像 ID。
+func isImageID(ref string) bool {
+	const prefix = "sha256:"
+	if !strings.HasPrefix(ref, prefix) {
+		return false
+	}
+	return !strings.Contains(ref[len(prefix):], "/")
 }
 
 func NewContainersListLogic(ctx context.Context, svcCtx *svc.ServiceContext) *ContainersListLogic {
@@ -73,8 +87,17 @@ func (l *ContainersListLogic) ContainersList() (resp *types.Resp, err error) {
 		if err != nil {
 			containerInfo.CreateImage = ""
 			l.Error("get image name error" + v.ID)
+		} else {
+			containerInfo.CreateImage = containerInspect.Config.Image
+			// Docker 在容器只记录镜像 ID 时会返回 sha256:...，
+			// 此时优先使用创建配置里的原始镜像引用（通常仍带 tag），
+			// 这样客户端仍能拿到可读的 name:tag。
+			if isImageID(containerInfo.UsingImage) && !isImageID(containerInspect.Config.Image) {
+				containerInfo.UsingImage = containerInspect.Config.Image
+			}
 		}
-		containerInfo.CreateImage = containerInspect.Config.Image
+		// 显式告知客户端当前引用是否只是镜像 ID，避免其按 name:tag 误拆。
+		containerInfo.UsingImageIsID = isImageID(containerInfo.UsingImage)
 		// compose 创建的容器带 com.docker.compose.project / .service 标签
 		if v.Labels != nil {
 			containerInfo.ComposeProject = v.Labels["com.docker.compose.project"]
