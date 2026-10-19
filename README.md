@@ -163,6 +163,7 @@ compose 文件存放在 `COMPOSE_DIR`（默认 `/data/stacks`），目录结构�
 ```
 /data/stacks/
 ├── app.yaml                 # compose 文件
+├── .env                     # 变量文件（可选）
 ├── .backups/                # 保存前自动备份，每文件最多保留 20 份
 ├── .trash/                  # 软删除的文件，可恢复
 ├── .history.jsonl           # 版本历史，最多 200 条
@@ -173,7 +174,36 @@ compose 文件存放在 `COMPOSE_DIR`（默认 `/data/stacks`），目录结构�
 - 覆盖保存前会先备份旧内容，**备份失败则取消保存**
 - 删除是软删除，进入 `.trash` 可从界面或接口恢复
 - 回滚前会把当前内容再备份一次，避免回滚成为新的丢失点
-- 文件名校验：仅允许单层 `.yml` / `.yaml`，拒绝路径穿越
+- 文件名校验：允许单层 `.yml` / `.yaml` 与 `.env` 系列，拒绝路径穿越
+
+### 环境变量
+
+支持在 compose 中使用变量插值：
+
+```yaml
+services:
+  web:
+    image: nginx:${NGINX_TAG:-latest}
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD}
+```
+
+变量取自 stacks 目录下的 `.env`：
+
+```bash
+# /data/stacks/.env
+NGINX_TAG=1.27
+DB_PASSWORD=change_me
+```
+
+- `.env` 和 `.env.production` 这类变体都能通过界面创建、编辑
+- 保存或校验 compose 时会注入 `.env`，**未定义且无默认值的变量会直接报错**，
+  不会等到执行时才失败
+- 带默认值的写法 `${VAR:-default}` 始终允许
+
+**注意**：校验使用服务端容器内 `/data/stacks/.env`，而实际执行由宿主机上的
+`docker compose` 完成，它读取的是宿主机侧的 `.env` 与进程环境变量。
+请确保两边一致，否则可能出现「校验通过但执行失败」。
 
 ## Compose 执行
 

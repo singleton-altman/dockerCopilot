@@ -99,10 +99,11 @@ func (l *Logic) Delete(req *types.ComposeDeleteReq) (resp *types.Resp, err error
 	return resp, nil
 }
 
-// Validate 仅校验，不落盘
+// Validate 仅校验，不落盘。
+// 会注入 stacks 目录的 .env，因此未定义的变量能在这里被发现。
 func (l *Logic) Validate(req *types.ComposeFileReq) (resp *types.Resp, err error) {
 	resp = &types.Resp{}
-	if err = composefile.Validate(req.Content); err != nil {
+	if err = l.svcCtx.ComposeStore.ValidateContent(req.Filename, req.Content); err != nil {
 		resp.Code = 400
 		resp.Msg = err.Error()
 		resp.Data = map[string]interface{}{}

@@ -42,6 +42,8 @@ type FileInfo struct {
 	Name      string `json:"name"`
 	Size      int64  `json:"size"`
 	UpdatedAt string `json:"updatedAt"`
+	// IsEnv 标记该文件是 dotenv 变量文件而非 compose 配置
+	IsEnv bool `json:"isEnv,omitempty"`
 }
 
 // Version 一次保存的版本快照
@@ -91,7 +93,7 @@ func (s *Store) ensureDir() error {
 }
 
 // resolve 校验文件名并返回绝对路径。
-// 只允许单层、带 .yml/.yaml 扩展名的安全文件名，防止目录穿越。
+// 允许单层 .yml/.yaml，以及 .env 系列变量文件，防止目录穿越。
 func (s *Store) resolve(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -100,6 +102,10 @@ func (s *Store) resolve(name string) (string, error) {
 	if name != filepath.Base(name) || strings.ContainsAny(name, `/\`) {
 		return "", errors.New("非法文件名")
 	}
+	// dotenv 文件以点开头且扩展名不是 yaml，单独走一条校验分支
+	if isDotenvName(name) {
+		return s.dotenvPath(name)
+	}
 	if strings.HasPrefix(name, ".") {
 		return "", errors.New("非法文件名")
 	}
@@ -107,7 +113,7 @@ func (s *Store) resolve(name string) (string, error) {
 		return "", errors.New("文件名只能包含字母、数字、点、下划线和短横线")
 	}
 	if !allowedExts[strings.ToLower(filepath.Ext(name))] {
-		return "", errors.New("仅支持 .yml 或 .yaml 文件")
+		return "", errors.New("仅支持 .yml、.yaml 或 .env 文件")
 	}
 
 	base, err := filepath.Abs(s.dir)
@@ -140,7 +146,9 @@ func (s *Store) List() ([]FileInfo, error) {
 		if entry.IsDir() {
 			continue
 		}
-		if !allowedExts[strings.ToLower(filepath.Ext(entry.Name()))] {
+		name := entry.Name()
+		// Compose 文件与 dotenv 文件都纳入列表；内部目录以点开头但不在这里出现
+		if !allowedExts[strings.ToLower(filepath.Ext(name))] && !isDotenvName(name) {
 			continue
 		}
 		info, err := entry.Info()
@@ -148,9 +156,10 @@ func (s *Store) List() ([]FileInfo, error) {
 			continue
 		}
 		items = append(items, FileInfo{
-			Name:      entry.Name(),
+			Name:      name,
 			Size:      info.Size(),
 			UpdatedAt: info.ModTime().Format("2006-01-02 15:04:05"),
+			IsEnv:     isDotenvName(name),
 		})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
@@ -173,15 +182,23 @@ func (s *Store) Read(name string) (string, error) {
 	return string(content), nil
 }
 
-// Save 写入文件。写入前会做 YAML 结构校验，并把旧内容备份一份。
+// Save 写入文件。compose 文件写入前会做结构校验，并把旧内容备份一份。
 // 返回是否为新建文件。
 func (s *Store) Save(name, content string) (bool, error) {
 	path, err := s.resolve(name)
 	if err != nil {
 		return false, err
 	}
-	if err := Validate(content); err != nil {
-		return false, err
+
+	if isDotenvName(name) {
+		// dotenv 只做最基础的格式检查，避免把明显错误的内容写进去
+		if err := validateDotenv(content); err != nil {
+			return false, err
+		}
+	} else {
+		if err := s.validateWithEnvironment(content); err != nil {
+			return false, err
+		}
 	}
 
 	s.mu.Lock()
@@ -524,6 +541,25 @@ func (s *Store) readHistoryLocked(name string) ([]Version, error) {
 // Validate 校验 compose YAML 结构。
 // 返回的错误只描述结构问题，不回显文件内容，避免把敏感配置写进日志/响应。
 func Validate(content string) error {
+	return validateWithEnv(content, nil)
+}
+
+// validateWithEnvironment 用 stacks 目录的 .env 注入变量后再校验。
+// 这样 `${VAR}` 未定义、拼写错误能在保存时就发现，而不是等到宿主机执行。
+func (s *Store) validateWithEnvironment(content string) error {
+	return validateWithEnv(content, s.loadDotenv())
+}
+
+// ValidateContent 校验内容。
+// filename 为空时按 compose 处理；以 dotenv 命名时只做变量文件格式检查。
+func (s *Store) ValidateContent(filename, content string) error {
+	if isDotenvName(strings.TrimSpace(filename)) {
+		return validateDotenv(content)
+	}
+	return validateWithEnv(content, s.loadDotenv())
+}
+
+func validateWithEnv(content string, env map[string]string) error {
 	if strings.TrimSpace(content) == "" {
 		return errors.New("内容不能为空")
 	}
@@ -545,15 +581,86 @@ func Validate(content string) error {
 		return errors.New("services 至少要包含一个服务")
 	}
 
-	// 用 compose-go 做一次完整加载，捕获类型错误。
-	// 项目名只用于解析，不参与校验结果，这里给一个固定占位值。
-	if _, err := loader.Load(composeType.ConfigDetails{
+	details := composeType.ConfigDetails{
 		ConfigFiles: []composeType.ConfigFile{{Content: []byte(content)}},
-	}, func(options *loader.Options) {
+		Environment: composeType.Mapping(env),
+	}
+
+	// compose-go 对未定义变量只打印 warning，不会返回错误。
+	// 这里额外扫描模板引用的变量，把「缺变量」变成可拦截的错误。
+	if missing := findMissingVariables(content, env); len(missing) > 0 {
+		return fmt.Errorf("以下变量未定义: %s（可在 stacks/.env 中配置）", strings.Join(missing, ", "))
+	}
+
+	// 用 compose-go 做一次完整加载，捕获类型错误与变量缺失。
+	// 项目名只用于解析，不参与校验结果，这里给一个固定占位值。
+	if _, err := loader.Load(details, func(options *loader.Options) {
 		options.SkipValidation = false
 		options.SetProjectName("compose-validation", false)
 	}); err != nil {
 		return fmt.Errorf("compose 结构校验失败: %s", sanitizeErr(err))
+	}
+	return nil
+}
+
+// variablePattern 匹配 `${VAR}` 与 `${VAR:-default}` / `${VAR-default}` 等形式。
+var variablePattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)([:?+-][^}]*)?\}`)
+
+// findMissingVariables 找出模板里没有值也没有默认值、且环境里未定义的变量。
+func findMissingVariables(content string, env map[string]string) []string {
+	seen := map[string]bool{}
+	var missing []string
+
+	for _, match := range variablePattern.FindAllStringSubmatch(content, -1) {
+		name := match[1]
+		operator := match[2]
+		if seen[name] {
+			continue
+		}
+
+		// 带默认值或替代值的表达式即使变量缺失也不会导致空串，视为安全
+		if operator != "" {
+			kind := operator[:1]
+			if kind == ":" || kind == "-" || kind == "+" {
+				continue
+			}
+			// `:?` / `?` 是显式要求变量必须存在
+		}
+
+		if _, ok := env[name]; ok {
+			continue
+		}
+		seen[name] = true
+		missing = append(missing, name)
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// validateDotenv 对 dotenv 内容做最基础的检查。
+// 允许空行、注释与空文件（用户可能先建占位文件再填），
+// 但出现无法解析的行时拒绝，避免把明显错误的内容写进去。
+func validateDotenv(content string) error {
+	if len(content) > 1<<20 {
+		return errors.New("文件过大（上限 1MB）")
+	}
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return nil
+	}
+
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(line[len("export "):])
+		}
+		eq := strings.Index(line, "=")
+		if eq <= 0 || !isValidEnvKey(strings.TrimSpace(line[:eq])) {
+			return fmt.Errorf("无效的环境变量行: %s", sanitizeErr(errors.New(line)))
+		}
 	}
 	return nil
 }
