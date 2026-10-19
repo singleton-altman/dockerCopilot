@@ -58,6 +58,37 @@ type IdReq {
 	Id string `path:"id"`
 }
 
+type ComposeFileReq {
+	Filename string `json:"filename"`
+	Content  string `json:"content,optional"`
+}
+
+type ComposeReadReq {
+	Filename string `form:"filename"`
+}
+
+type ComposeDeleteReq {
+	Filename string `form:"filename"`
+}
+
+type ComposeRollbackReq {
+	Filename   string `json:"filename"`
+	BackupName string `json:"backupName"`
+}
+
+type ComposeRestoreReq {
+	Name string `json:"name"`
+}
+
+type ComposeDeployReq {
+	Filename string `json:"filename"`
+	Action   string `json:"action"`
+}
+
+type ComposeJobReq struct {
+	JobID string `form:"jobId"`
+}
+
 type ContainerRestoreReq {
 	Filename string `json:"filename"`
 }
@@ -179,6 +210,49 @@ service dockerCopilot {
 
 	@handler updateProgram
 		put /program returns (Resp)
+}
+
+@server(
+	prefix: /api
+	group: composefile
+	jwt: Auth
+)
+service dockerCopilot {
+	@handler list
+	get /compose/files returns (Resp)
+
+	@handler read
+	get /compose/file (ComposeReadReq) returns (Resp)
+
+	@handler save
+	put /compose/file (ComposeFileReq) returns (Resp)
+
+	@handler remove
+	delete /compose/file (ComposeDeleteReq) returns (Resp)
+
+	@handler validate
+	post /compose/validate (ComposeFileReq) returns (Resp)
+
+	@handler versions
+	get /compose/versions (ComposeReadReq) returns (Resp)
+
+	@handler rollback
+	post /compose/rollback (ComposeRollbackReq) returns (Resp)
+
+	@handler trash
+	get /compose/trash returns (Resp)
+
+	@handler restore
+	post /compose/restore (ComposeRestoreReq) returns (Resp)
+
+	@handler deploy
+	post /compose/deploy (ComposeDeployReq) returns (Resp)
+
+	@handler job
+	get /compose/job (ComposeJobReq) returns (Resp)
+
+	@handler history
+	get /compose/history returns (Resp)
 }
 
 @server(
