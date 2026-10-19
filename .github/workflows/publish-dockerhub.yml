@@ -12,7 +12,7 @@ name: Publish Docker Image
 #
 # 可选配置：
 #   DOCKERHUB_REPOSITORY  镜像名，默认 dockercopilot
-#   FRONTEND_REPOSITORY   前端仓库，默认 onlyLTY/Docker-Copilot-React
+#   FRONTEND_REPOSITORY   前端仓库，默认 singleton-altman/Docker-Copilot-React
 #   FRONTEND_REF          前端分支或 tag，默认 master
 
 on:
@@ -36,7 +36,7 @@ permissions:
 env:
   GO_VERSION: '1.23.4'
   NODE_VERSION: '22'
-  FRONTEND_REPOSITORY: ${{ vars.FRONTEND_REPOSITORY || 'onlyLTY/Docker-Copilot-React' }}
+  FRONTEND_REPOSITORY: ${{ vars.FRONTEND_REPOSITORY || 'singleton-altman/Docker-Copilot-React' }}
   FRONTEND_REF: ${{ vars.FRONTEND_REF || 'master' }}
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.DOCKERHUB_REPOSITORY || 'dockercopilot' }}
 
