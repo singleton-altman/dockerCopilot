@@ -58,6 +58,16 @@ type IdReq {
 	Id string `path:"id"`
 }
 
+type ContainerLogsReq {
+	IdReq
+	Tail       int  `form:"tail,default=300"`
+	Timestamps bool `form:"timestamps,default=false"`
+}
+
+type ReleaseRepoReq {
+	Repo string `json:"repo"`
+}
+
 type ContainerRestoreReq {
 	Filename string `json:"filename"`
 }
@@ -179,6 +189,25 @@ service dockerCopilot {
 
 	@handler updateProgram
 		put /program returns (Resp)
+}
+
+@server(
+	prefix: /api
+	group: releasewatch
+	jwt: Auth
+)
+service dockerCopilot {
+	@handler list
+	get /release/repos returns (Resp)
+
+	@handler add
+	post /release/repos (ReleaseRepoReq) returns (Resp)
+
+	@handler remove
+	delete /release/repos (ReleaseRepoReq) returns (Resp)
+
+	@handler check
+	post /release/check returns (Resp)
 }
 
 @server(

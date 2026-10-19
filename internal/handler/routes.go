@@ -11,6 +11,7 @@ import (
 	icons "github.com/onlyLTY/dockerCopilot/internal/handler/icons"
 	image "github.com/onlyLTY/dockerCopilot/internal/handler/image"
 	progress "github.com/onlyLTY/dockerCopilot/internal/handler/progress"
+	releasewatch "github.com/onlyLTY/dockerCopilot/internal/handler/releasewatch"
 	version "github.com/onlyLTY/dockerCopilot/internal/handler/version"
 	"github.com/onlyLTY/dockerCopilot/internal/svc"
 
@@ -141,6 +142,33 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Method:  http.MethodGet,
 				Path:    "/progress/:taskid",
 				Handler: progress.GetProgressHandler(serverCtx),
+			},
+		},
+		rest.WithJwt(serverCtx.Config.Auth.AccessSecret),
+		rest.WithPrefix("/api"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				Method:  http.MethodGet,
+				Path:    "/release/repos",
+				Handler: releasewatch.ListHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/release/repos",
+				Handler: releasewatch.AddHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodDelete,
+				Path:    "/release/repos",
+				Handler: releasewatch.RemoveHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/release/check",
+				Handler: releasewatch.CheckHandler(serverCtx),
 			},
 		},
 		rest.WithJwt(serverCtx.Config.Auth.AccessSecret),

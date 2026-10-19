@@ -40,6 +40,10 @@ type IdReq struct {
 	Id string `path:"id"`
 }
 
+type ReleaseRepoReq struct {
+	Repo string `json:"repo"`
+}
+
 type LoginReq struct {
 	SecretKey string `form:"secretKey,optional"`
 }
