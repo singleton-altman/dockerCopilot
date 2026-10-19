@@ -7,3 +7,5 @@ Log:
 Auth:
   AccessSecret: ${secretKey}
   AccessExpire: 7257600
+Compose:
+  Dir: ${COMPOSE_DIR}

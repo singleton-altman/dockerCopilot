@@ -40,6 +40,37 @@ type IdReq struct {
 	Id string `path:"id"`
 }
 
+type ComposeFileReq struct {
+	Filename string `json:"filename"`
+	Content  string `json:"content,optional"`
+}
+
+type ComposeReadReq struct {
+	Filename string `form:"filename"`
+}
+
+type ComposeDeleteReq struct {
+	Filename string `form:"filename"`
+}
+
+type ComposeRollbackReq struct {
+	Filename   string `json:"filename"`
+	BackupName string `json:"backupName"`
+}
+
+type ComposeRestoreReq struct {
+	Name string `json:"name"`
+}
+
+type ComposeDeployReq struct {
+	Filename string `json:"filename"`
+	Action   string `json:"action"`
+}
+
+type ComposeJobReq struct {
+	JobID string `form:"jobId"`
+}
+
 type LoginReq struct {
 	SecretKey string `form:"secretKey,optional"`
 }

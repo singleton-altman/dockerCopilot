@@ -4,6 +4,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/onlyLTY/dockerCopilot/internal/config"
 	"github.com/onlyLTY/dockerCopilot/internal/module"
+	"github.com/onlyLTY/dockerCopilot/internal/utiles/composefile"
 	"github.com/zeromicro/go-zero/core/logx"
 	"github.com/zeromicro/go-zero/rest"
 	"sync"
@@ -20,6 +21,8 @@ type ServiceContext struct {
 	IndexCheckMiddleware       rest.Middleware
 	ProgressStore              ProgressStoreType
 	DockerClient               *client.Client
+	ComposeStore               *composefile.Store
+	ComposeExecutor            *composefile.Executor
 	mu                         sync.Mutex
 }
 
@@ -40,10 +43,12 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		logx.Errorf("Unable to create docker client: %s", err)
 	}
 	return &ServiceContext{
-		Config:        c,
-		HubImageInfo:  module.NewImageCheck(),
-		ProgressStore: make(ProgressStoreType),
-		DockerClient:  cli,
+		Config:          c,
+		HubImageInfo:    module.NewImageCheck(),
+		ProgressStore:   make(ProgressStoreType),
+		DockerClient:    cli,
+		ComposeStore:    composefile.NewStore(c.ComposeDir()),
+		ComposeExecutor: composefile.NewExecutor(c.ComposeDir()),
 	}
 }
 
