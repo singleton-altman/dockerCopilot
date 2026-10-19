@@ -40,6 +40,12 @@ type IdReq struct {
 	Id string `path:"id"`
 }
 
+type ContainerLogsReq struct {
+	IdReq
+	Tail       int  `form:"tail,default=300"`
+	Timestamps bool `form:"timestamps,default=false"`
+}
+
 type ReleaseRepoReq struct {
 	Repo string `json:"repo"`
 }
