@@ -209,6 +209,110 @@ watcher 的行为：
 **注意**：watcher 停止时，界面上的执行按钮只会写入队列文件，不会真正执行。
 生产环境建议用 systemd / launchd 托管。
 
+## 开发环境
+
+Go 1.23+。
+
+### 本地构建
+
+服务端通过 `//go:embed front/*` 把 Web UI 打进二进制，**编译前必须先准备好 `front/` 目录**，
+否则界面会是空白。
+
+使用脚本一步完成（前端 → front/ → 编译）：
+
+```bash
+# 前端仓库默认取同级的 Docker-Copilot-React
+./scripts/build-local.sh
+
+# 指定平台
+./scripts/build-local.sh linux arm64
+
+# 指定前端目录
+FRONTEND_DIR=/path/to/Docker-Copilot-React ./scripts/build-local.sh
+```
+
+产物位于 `dist/linux/<arch>/dockerCopilot`。
+
+也可以手动执行：
+
+```bash
+cd ../Docker-Copilot-React && npm ci && npm run build
+rm -rf ../dockerCopilot/front && cp -R dist ../dockerCopilot/front
+cd ../dockerCopilot
+go build -o dockerCopilot .
+```
+
+### 运行测试
+
+```bash
+go test ./internal/...
+```
+
+## 发布
+
+项目通过 GitHub Actions 自动构建多架构镜像并推送到 Docker Hub。
+
+### 发布流程
+
+**1. 更新版本号**
+
+```bash
+echo "v2.1.7" > version
+echo "v2.1.7-FNOS" > fn_version
+echo "v2.1.7-UGREEN" > ugreen_version
+```
+
+**2. 提交并推送**
+
+```bash
+git add version fn_version ugreen_version
+git commit -m "chore: 版本号升至 v2.1.7"
+git push fork latest
+```
+
+**3. 打 tag 触发发布**
+
+```bash
+git tag v2.1.7
+git push fork v2.1.7
+```
+
+Workflow 会自动完成：构建前端 → 交叉编译 amd64/arm64 → 运行测试 →
+Buildx 构建多架构镜像 → 推送。
+
+产出：
+
+```
+{username}/dockercopilot:2.1.7
+{username}/dockercopilot:latest
+```
+
+### 手动触发
+
+GitHub 仓库 → **Actions → Publish Docker Image → Run workflow**：
+
+- `version`：指定版本号，留空则读取 `version` 文件
+- `push_latest`：是否额外打 `latest` 标签（推送 tag 时默认打）
+
+### 构建配置
+
+**Secrets（必需）**
+
+| 名称 | 说明 |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名 |
+| `DOCKERHUB_TOKEN` | Docker Hub Access Token（Read & Write） |
+
+**Variables（可选）**
+
+| 名称 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DOCKERHUB_REPOSITORY` | `dockercopilot` | 镜像名 |
+| `FRONTEND_REPOSITORY` | `singleton-altman/Docker-Copilot-React` | 前端仓库 |
+| `FRONTEND_REF` | `master` | 前端分支或 tag |
+
+前端改动需要先推送到前端仓库的 `master`，再触发服务端发布，否则镜像里仍是旧页面。
+
 ## 安全说明
 
 - 挂载 `docker.sock` 等价于宿主机 root 权限，**不要暴露到公网**
@@ -216,16 +320,3 @@ watcher 的行为：
 - 关注仓库的请求地址固定为 `https://api.github.com`
 - compose 执行的实际权限由宿主机 watcher 承担，服务端不执行任意命令
 
-## 开发环境
-
-Go 1.23+。
-
-```bash
-go run dockercopilot.go
-```
-
-运行测试：
-
-```bash
-go test ./internal/...
-```
