@@ -1,0 +1,238 @@
+name: Publish Docker Image
+
+# 把 fork 的代码构建成多架构镜像并推送到 Docker Hub。
+#
+# 触发方式：
+#   1. 推送版本 tag（v1.2.3 / v1.2.3-custom）→ 发布对应版本
+#   2. 手动触发 → 可选额外打 latest
+#
+# 需要配置的仓库 Secrets：
+#   DOCKERHUB_USERNAME  Docker Hub 用户名
+#   DOCKERHUB_TOKEN     Docker Hub Access Token（推荐）或密码
+#
+# 可选配置：
+#   DOCKERHUB_REPOSITORY  镜像名，默认 dockercopilot
+#   FRONTEND_REPOSITORY   前端仓库，默认 onlyLTY/Docker-Copilot-React
+#   FRONTEND_REF          前端分支或 tag，默认 master
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '镜像版本号（例如 2.6.4）。留空则读取 version 文件'
+        required: false
+        default: ''
+      push_latest:
+        description: '同时打 latest 标签'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.23.4'
+  NODE_VERSION: '22'
+  FRONTEND_REPOSITORY: ${{ vars.FRONTEND_REPOSITORY || 'onlyLTY/Docker-Copilot-React' }}
+  FRONTEND_REF: ${{ vars.FRONTEND_REF || 'master' }}
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.DOCKERHUB_REPOSITORY || 'dockercopilot' }}
+
+jobs:
+  # 解析版本号，供后续 job 使用
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      build_date: ${{ steps.resolve.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: resolve
+        run: |
+          set -euo pipefail
+
+          # 优先级：手动输入 > tag 名 > version 文件
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          elif [ -f version ]; then
+            VERSION="$(tr -d '[:space:]' < version)"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="0.0.0"
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "无法确定版本号" >&2
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "解析出的版本号: ${VERSION}"
+
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout frontend
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FRONTEND_REPOSITORY }}
+          path: frontend
+          ref: ${{ env.FRONTEND_REF }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
+  build-backend:
+    needs: [prepare, build-frontend]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: front
+
+      - name: Verify frontend
+        run: |
+          test -f front/index.html || { echo "前端产物缺少 index.html" >&2; exit 1; }
+          ls -la front
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run tests
+        run: go test ./internal/...
+
+      - name: Build binary
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/linux/${{ matrix.arch }}
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} \
+            go build -trimpath \
+              -ldflags "-s -w \
+                -X 'github.com/onlyLTY/dockerCopilot/internal/config.Version=${VERSION}' \
+                -X 'github.com/onlyLTY/dockerCopilot/internal/config.BuildDate=${BUILD_DATE}'" \
+              -o dist/linux/${{ matrix.arch }}/dockerCopilot .
+
+      - name: Package backend
+        run: |
+          set -euo pipefail
+          # Dockerfile 读取：
+          #   dc-back/dist/<TARGETPLATFORM>/dockerCopilot  （TARGETPLATFORM = linux/amd64）
+          #   dc-back/etc/
+          #   start.sh（context 根目录，仓库内已有）
+          mkdir -p dc-back-${{ matrix.arch }}/
+          mkdir -p dc-back-${{ matrix.arch }}/dist/linux/${{ matrix.arch }}
+          cp dist/linux/${{ matrix.arch }}/dockerCopilot \
+             dc-back-${{ matrix.arch }}/dist/linux/${{ matrix.arch }}/
+          cp -r etc dc-back-${{ matrix.arch }}/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.arch }}
+          path: dc-back-${{ matrix.arch }}
+          retention-days: 1
+
+  push-image:
+    needs: [prepare, build-backend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: backend-*
+          merge-multiple: true
+          path: dc-back
+
+      - name: Verify artifacts
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            test -f "dc-back/dist/linux/${arch}/dockerCopilot" \
+              || { echo "缺少 ${arch} 二进制" >&2; exit 1; }
+          done
+          test -d dc-back/etc || { echo "缺少 etc 目录" >&2; exit 1; }
+          ls -R dc-back | head -40
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' || github.event.inputs.push_latest == 'true' }}
+          labels: |
+            org.opencontainers.image.title=dockerCopilot
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "### 镜像已推送"
+            echo ""
+            echo "版本：\`${{ needs.prepare.outputs.version }}\`"
+            echo ""
+            echo "标签："
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo ""
+            echo "平台：linux/amd64, linux/arm64"
+          } >> "$GITHUB_STEP_SUMMARY"
