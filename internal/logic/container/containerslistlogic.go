@@ -69,12 +69,12 @@ func (l *ContainersListLogic) ContainersList() (resp *types.Resp, err error) {
 			containerInfo.UsingImage = v.ImageID
 			l.Error("image dont have name" + v.ID)
 		}
-		containerInspect, err := utiles.GetContainerInspect(l.svcCtx, v.ID)
-		if err != nil {
-			containerInfo.CreateImage = ""
-			l.Error("get image name error" + v.ID)
-		}
-		containerInfo.CreateImage = containerInspect.Config.Image
+		// CreateImage 与 UsingImage 取自同一个字段：
+		// /containers/json 的 Image 就是 inspect 的 Config.Image。
+		// 此前对每个容器额外调用一次 inspect，只为取这个字符串，
+		// 使列表接口耗时随容器数量线性增长；且 inspect 失败时
+		// 仍会解引用零值 Config 导致 panic。
+		containerInfo.CreateImage = containerInfo.UsingImage
 		// compose 创建的容器带 com.docker.compose.project / .service 标签
 		if v.Labels != nil {
 			containerInfo.ComposeProject = v.Labels["com.docker.compose.project"]
