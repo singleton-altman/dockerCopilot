@@ -89,6 +89,16 @@ type ComposeJobReq struct {
 	JobID string `form:"jobId"`
 }
 
+type ContainerLogsReq {
+	IdReq
+	Tail       int  `form:"tail,default=300"`
+	Timestamps bool `form:"timestamps,default=false"`
+}
+
+type ReleaseRepoReq struct {
+	Repo string `json:"repo"`
+}
+
 type ContainerRestoreReq {
 	Filename string `json:"filename"`
 }
@@ -157,6 +167,9 @@ service dockerCopilot {
 
 	@handler start
 	post /container/:id/start (IdReq) returns (Resp)
+
+	@handler logs
+	get /container/:id/logs (ContainerLogsReq) returns (Resp)
 
 	@handler stop
 	post /container/:id/stop (IdReq) returns (Resp)
@@ -253,6 +266,25 @@ service dockerCopilot {
 
 	@handler history
 	get /compose/history returns (Resp)
+}
+
+@server(
+	prefix: /api
+	group: releasewatch
+	jwt: Auth
+)
+service dockerCopilot {
+	@handler list
+	get /release/repos returns (Resp)
+
+	@handler add
+	post /release/repos (ReleaseRepoReq) returns (Resp)
+
+	@handler remove
+	delete /release/repos (ReleaseRepoReq) returns (Resp)
+
+	@handler check
+	post /release/check returns (Resp)
 }
 
 @server(

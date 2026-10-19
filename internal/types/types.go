@@ -71,6 +71,16 @@ type ComposeJobReq struct {
 	JobID string `form:"jobId"`
 }
 
+type ContainerLogsReq struct {
+	IdReq
+	Tail       int  `form:"tail,default=300"`
+	Timestamps bool `form:"timestamps,default=false"`
+}
+
+type ReleaseRepoReq struct {
+	Repo string `json:"repo"`
+}
+
 type LoginReq struct {
 	SecretKey string `form:"secretKey,optional"`
 }

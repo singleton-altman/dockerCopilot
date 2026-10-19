@@ -7,5 +7,9 @@ Log:
 Auth:
   AccessSecret: ${secretKey}
   AccessExpire: 7257600
+ReleaseWatch:
+  IntervalMinutes: ${RELEASE_WATCH_INTERVAL_MINUTES}
+  GitHubToken: ${GITHUB_TOKEN}
+  DataDir: ${DATA_DIR}
 Compose:
   Dir: ${COMPOSE_DIR}

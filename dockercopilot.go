@@ -63,6 +63,10 @@ func main() {
 	defer server.Stop()
 	ctx := svc.NewServiceContext(c)
 
+	// 启动关注仓库的发布监控（后台定时检查）
+	ctx.ReleaseWatcher.Start()
+	defer ctx.ReleaseWatcher.Stop()
+
 	// Ensure data directory and config exist (Auto-init)
 	dataDir := "/data/config/image"
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
