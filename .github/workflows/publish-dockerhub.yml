@@ -34,7 +34,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: '1.23.4'
+  GO_VERSION: '1.26.9'
   NODE_VERSION: '22'
   FRONTEND_REPOSITORY: ${{ vars.FRONTEND_REPOSITORY || 'singleton-altman/Docker-Copilot-React' }}
   FRONTEND_REF: ${{ vars.FRONTEND_REF || 'master' }}
