@@ -50,6 +50,39 @@ type ReleaseRepoReq struct {
 	Repo string `json:"repo"`
 }
 
+type ComposeFileReq struct {
+	Filename string `json:"filename"`
+	Content  string `json:"content,optional"`
+}
+
+// ComposeReadReq 读取用：文件名走 query 参数。
+type ComposeReadReq struct {
+	Filename string `form:"filename"`
+}
+
+// ComposeDeleteReq 删除用：文件名走 query 参数，兼容无 body 的 DELETE。
+type ComposeDeleteReq struct {
+	Filename string `form:"filename"`
+}
+
+type ComposeDeployReq struct {
+	Filename string `json:"filename"`
+	Action   string `json:"action"`
+}
+
+type ComposeJobReq struct {
+	JobID string `form:"jobId"`
+}
+
+type ComposeRollbackReq struct {
+	Filename   string `json:"filename"`
+	BackupName string `json:"backupName"`
+}
+
+type ComposeRestoreReq struct {
+	Name string `json:"name"`
+}
+
 type LoginReq struct {
 	SecretKey string `form:"secretKey,optional"`
 }

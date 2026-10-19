@@ -20,6 +20,10 @@ type Config struct {
 		// DataDir 关注列表与去重状态的存放目录，为空时用 /data/config
 		DataDir string `json:",optional"`
 	}
+	Compose struct { // compose 文件编辑
+		// Dir compose 文件存放目录，为空时用 /data/stacks
+		Dir string `json:",optional"`
+	}
 }
 
 var (
@@ -42,4 +46,12 @@ func (c Config) ReleaseWatchDataDir() string {
 		return "/data/config"
 	}
 	return c.ReleaseWatch.DataDir
+}
+
+// ComposeDir 返回 compose 文件目录。
+func (c Config) ComposeDir() string {
+	if c.Compose.Dir == "" {
+		return "/data/stacks"
+	}
+	return c.Compose.Dir
 }

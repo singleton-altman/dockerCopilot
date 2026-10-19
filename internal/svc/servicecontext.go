@@ -6,6 +6,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/onlyLTY/dockerCopilot/internal/config"
 	"github.com/onlyLTY/dockerCopilot/internal/module"
+	"github.com/onlyLTY/dockerCopilot/internal/utiles/composefile"
 	"github.com/onlyLTY/dockerCopilot/internal/utiles/releasewatch"
 	"github.com/zeromicro/go-zero/core/logx"
 	"github.com/zeromicro/go-zero/rest"
@@ -24,6 +25,8 @@ type ServiceContext struct {
 	DockerClient               *client.Client
 	ReleaseStore               *releasewatch.Store
 	ReleaseWatcher             *releasewatch.Watcher
+	ComposeStore               *composefile.Store
+	ComposeExecutor            *composefile.Executor
 	mu                         sync.Mutex
 }
 
@@ -49,12 +52,14 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	watcher := releasewatch.NewWatcher(checker, c.CheckInterval())
 
 	return &ServiceContext{
-		Config:         c,
-		HubImageInfo:   module.NewImageCheck(),
-		ProgressStore:  make(ProgressStoreType),
-		DockerClient:   cli,
-		ReleaseStore:   releaseStore,
-		ReleaseWatcher: watcher,
+		Config:          c,
+		HubImageInfo:    module.NewImageCheck(),
+		ProgressStore:   make(ProgressStoreType),
+		DockerClient:    cli,
+		ReleaseStore:    releaseStore,
+		ReleaseWatcher:  watcher,
+		ComposeStore:    composefile.NewStore(c.ComposeDir()),
+		ComposeExecutor: composefile.NewExecutor(c.ComposeDir()),
 	}
 }
 

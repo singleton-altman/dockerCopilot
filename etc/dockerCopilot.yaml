@@ -11,3 +11,5 @@ ReleaseWatch:
   IntervalMinutes: ${RELEASE_WATCH_INTERVAL_MINUTES}
   GitHubToken: ${GITHUB_TOKEN}
   DataDir: ${DATA_DIR}
+Compose:
+  Dir: ${COMPOSE_DIR}

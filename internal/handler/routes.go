@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	auth "github.com/onlyLTY/dockerCopilot/internal/handler/auth"
+	composefile "github.com/onlyLTY/dockerCopilot/internal/handler/composefile"
 	container "github.com/onlyLTY/dockerCopilot/internal/handler/container"
 	icons "github.com/onlyLTY/dockerCopilot/internal/handler/icons"
 	image "github.com/onlyLTY/dockerCopilot/internal/handler/image"
@@ -147,6 +148,73 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Method:  http.MethodGet,
 				Path:    "/progress/:taskid",
 				Handler: progress.GetProgressHandler(serverCtx),
+			},
+		},
+		rest.WithJwt(serverCtx.Config.Auth.AccessSecret),
+		rest.WithPrefix("/api"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				Method:  http.MethodGet,
+				Path:    "/compose/files",
+				Handler: composefile.ListHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/compose/file",
+				Handler: composefile.ReadHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodPut,
+				Path:    "/compose/file",
+				Handler: composefile.SaveHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodDelete,
+				Path:    "/compose/file",
+				Handler: composefile.DeleteHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/compose/validate",
+				Handler: composefile.ValidateHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/compose/deploy",
+				Handler: composefile.DeployHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/compose/job",
+				Handler: composefile.ResultHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/compose/history",
+				Handler: composefile.HistoryHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/compose/versions",
+				Handler: composefile.VersionsHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/compose/rollback",
+				Handler: composefile.RollbackHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
+				Path:    "/compose/trash",
+				Handler: composefile.TrashHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodPost,
+				Path:    "/compose/restore",
+				Handler: composefile.RestoreHandler(serverCtx),
 			},
 		},
 		rest.WithJwt(serverCtx.Config.Auth.AccessSecret),
