@@ -23,6 +23,7 @@ type ServiceContext struct {
 	IndexCheckMiddleware       rest.Middleware
 	ProgressStore              ProgressStoreType
 	DockerClient               *client.Client
+	ContainerStatsCache        *module.ContainerStatsCache
 	ComposeStore               *composefile.Store
 	ComposeExecutor            *composefile.Executor
 	ReleaseStore               *releasewatch.Store
@@ -52,14 +53,15 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	watcher := releasewatch.NewWatcher(checker, c.CheckInterval())
 
 	return &ServiceContext{
-		Config:          c,
-		HubImageInfo:    module.NewImageCheck(),
-		ProgressStore:   make(ProgressStoreType),
-		DockerClient:    cli,
-		ComposeStore:    composefile.NewStore(c.ComposeDir()),
-		ComposeExecutor: composefile.NewExecutor(c.ComposeDir()),
-		ReleaseStore:    releaseStore,
-		ReleaseWatcher:  watcher,
+		Config:              c,
+		HubImageInfo:        module.NewImageCheck(),
+		ProgressStore:       make(ProgressStoreType),
+		DockerClient:        cli,
+		ContainerStatsCache: module.NewContainerStatsCache(),
+		ComposeStore:        composefile.NewStore(c.ComposeDir()),
+		ComposeExecutor:     composefile.NewExecutor(c.ComposeDir()),
+		ReleaseStore:        releaseStore,
+		ReleaseWatcher:      watcher,
 	}
 }
 

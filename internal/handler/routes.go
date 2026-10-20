@@ -100,6 +100,11 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 			},
 			{
 				Method:  http.MethodGet,
+				Path:    "/container/stats",
+				Handler: container.StatsHandler(serverCtx),
+			},
+			{
+				Method:  http.MethodGet,
 				Path:    "/containers",
 				Handler: container.ContainersListHandler(serverCtx),
 			},
