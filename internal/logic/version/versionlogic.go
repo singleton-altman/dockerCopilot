@@ -44,7 +44,7 @@ func (l *VersionLogic) Version(req *types.VersionReq) (resp *types.Resp, err err
 				"remoteVersion": config.Version,
 			}
 			return resp, nil
-		} else if remoteVersion != config.Version {
+		} else if remoteVersion != utiles.NormalizeChannelVersion(config.Version) {
 			resp.Code = 200
 			resp.Msg = "程序有更新"
 			resp.Data = map[string]string{
