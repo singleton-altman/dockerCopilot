@@ -18,9 +18,12 @@ const (
 	channelSuffixFNS       = "-FNOS"
 )
 
-// NormalizeChannelVersion 去掉渠道后缀（-UGREEN/-FNOS），
-// 只保留语义版本用于本地/远程比较：v2.2.1-UGREEN 与 v2.2.1 视为同一版本。
+// NormalizeChannelVersion 去掉前导 v 与渠道后缀（-UGREEN/-FNOS），
+// 只保留语义版本用于本地/远程比较：
+// v2.2.2-UGREEN、2.2.2、v2.2.2 视为同一版本（镜像内无 v，分支文件/渠道包带 v）。
 func NormalizeChannelVersion(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "v")
 	v = strings.TrimSuffix(v, channelSuffixUGRN)
 	v = strings.TrimSuffix(v, channelSuffixFNS)
 	return v
@@ -36,6 +39,8 @@ func GetRemoteVersion() (remoteVersion string, err error) {
 	if err != nil {
 		return "0.0.0", err
 	}
+	// 远程文件可能带 v 前缀（分支文件手写），与本地口径统一后再返回
+	remoteVersion = NormalizeChannelVersion(remoteVersion)
 
 	localVersion := config.Version
 	if strings.Contains(localVersion, channelSuffixFNS) {
