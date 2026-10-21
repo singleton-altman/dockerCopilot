@@ -11,6 +11,8 @@
 **容器**
 
 - 一键更新容器，支持指定镜像与 tag
+- 更新中断：镜像下载阶段可即时停止，容器保持原状
+- 容器资源指标：CPU 占用、内存、网络速率（5s 实时刷新）
 - 启动、停止、重启、重命名容器
 - 查看容器日志，支持 tail、时间戳、结构化日志解析
 - 更新进度查看
@@ -61,7 +63,7 @@ services:
       # 可选：关注仓库监控
       - RELEASE_WATCH_INTERVAL_MINUTES=60
       - GITHUB_TOKEN=
-    image: 0nlylty/dockercopilot:latest
+    image: liuloktar/dockercopilot:latest
 ```
 
 访问 `http://<host>:12712/manager` 打开管理界面。
@@ -76,7 +78,7 @@ services:
 | `COMPOSE_DIR` | `/data/stacks` | compose 文件目录 |
 | `RELEASE_WATCH_INTERVAL_MINUTES` | `60` | 发布检查间隔，最小 5 分钟 |
 | `GITHUB_TOKEN` | 空 | 提高 GitHub API 频率上限 |
-| `DelOldContainer` | `true` | 更新容器后是否删除旧容器 |
+| `DelOldContainer` | `true` | 更新容器后是否删除旧容器（旧容器会先以 `原名-时间戳` 备份，成功后删除） |
 
 ## API
 
@@ -97,7 +99,18 @@ POST   /api/container/:id/stop
 POST   /api/container/:id/restart
 POST   /api/container/:id/rename?newName=
 POST   /api/container/:id/update
+POST   /api/container/:id/update/cancel
+GET    /api/container/updates
+GET    /api/container/:id/rollback*
 GET    /api/container/:id/logs?tail=&timestamps=
+
+`GET /api/container/stats` 返回所有 running 容器的资源指标：
+`cpuPercent`、`memoryUsage/Limit/Percent`、`netRx/netTx`、`netRxRate/netTxRate`、
+`blockRead/blockWrite`、`pids`（v2.2.0+）。
+
+`POST .../update/cancel` 仅在镜像拉取阶段可中断（容器未改动，直接停止下载）；
+进入容器变更阶段后返回 400，更新会执行到底，失败时自动恢复旧容器。
+`GET /api/container/updates` 返回最近 50 条更新记录（含进行中与历史，v2.3.0+）。
 GET    /api/container/backup
 GET    /api/container/backup2compose
 GET    /api/container/listBackups
@@ -350,3 +363,10 @@ GitHub 仓库 → **Actions → Publish Docker Image → Run workflow**：
 - 关注仓库的请求地址固定为 `https://api.github.com`
 - compose 执行的实际权限由宿主机 watcher 承担，服务端不执行任意命令
 
+## 关于本 Fork
+
+本项目是 [onlyLTY/dockerCopilot](https://github.com/onlyLTY/dockerCopilot)（AGPLv3）
+的增强分支，在原功能之上新增：容器资源指标、更新中断、compose 变量文件、
+发布监控增强，以及独立于上游的 fnOS / UGREEN 更新渠道。
+
+遵循 AGPLv3 协议，欢迎 Issue 与 PR。
