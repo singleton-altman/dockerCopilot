@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	dockerTypes "github.com/docker/docker/api/types"
@@ -92,15 +93,44 @@ func setPhase(ctx *svc.ServiceContext, rec *module.ContainerUpdateRecord, phase,
 	})
 }
 
-// canceled 检查取消意图；取消由 cancel 接口置位。
+// watchCancel 每 200ms 检查一次取消意图，一旦置位立即取消 context，
+// 使正在阻塞的镜像下载/容器操作马上返回。退出条件：取消或协程结束。
+func watchCancel(ctx *svc.ServiceContext, name string, cancel context.CancelFunc) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for range ticker.C {
+		if ctx.UpdateRecords.IsCancelRequested(name) {
+			cancel()
+			return
+		}
+		latest, ok := ctx.UpdateRecords.Snapshot(name)
+		if !ok || latest.Status != module.StatusRunning {
+			cancel()
+			return
+		}
+	}
+}
+
+// canceled 判断更新是否应中止：用户请求中断（CancelRequested），
+// 或记录已被并发回撤（status 不再是 running）。后者必须检查，
+// 否则回撤与更新协程会互相踩踏，把容器改到中间状态。
 func canceled(ctx *svc.ServiceContext, rec *module.ContainerUpdateRecord) bool {
-	return ctx.UpdateRecords.IsCancelRequested(rec.ContainerName)
+	if ctx.UpdateRecords.IsCancelRequested(rec.ContainerName) {
+		return true
+	}
+	latest, ok := ctx.UpdateRecords.Snapshot(rec.ContainerName)
+	return ok && latest.Status != module.StatusRunning
 }
 
 // UpdateContainer 推进一次容器更新。每个阶段之间检查取消信号；
 // 取消或任一步失败都会自动回撤到更新前状态，不会留在半截。
 func UpdateContainer(serviceContext *svc.ServiceContext, rec *module.ContainerUpdateRecord, delOldContainer bool) error {
-	ctx := context.Background()
+	// 可取消的 context：cancel 接口置位后，正在进行的 ImagePull 读取会被立即打断，
+	// 而不是等镜像下载完才在阶段边界发现取消。
+	ctx, cancelUpdate := context.WithCancel(context.Background())
+	defer cancelUpdate()
+	go watchCancel(serviceContext, rec.ContainerName, cancelUpdate)
+
 	cli := serviceContext.DockerClient
 	name := rec.ContainerName
 
@@ -122,9 +152,17 @@ func UpdateContainer(serviceContext *svc.ServiceContext, rec *module.ContainerUp
 	setPhase(serviceContext, rec, module.PhasePulling, "正在拉取新镜像", 10)
 	reader, err := cli.ImagePull(ctx, rec.ImageNameAndTag, image.PullOptions{})
 	if err != nil {
+		// 取消会让 ImagePull 以 context canceled 返回，这属于用户中断而非失败
+		if isCanceledErr(err) || canceled(serviceContext, rec) {
+			return abortAndRollback(serviceContext, rec, "用户中断更新", 15)
+		}
 		return fail("拉取镜像失败", err)
 	}
 	if err := decodePullResp(reader, serviceContext, rec.ID); err != nil {
+		if isCanceledErr(err) || canceled(serviceContext, rec) {
+			// 下载中被中断：容器一行都没动，直接标记中断即可
+			return abortAndRollback(serviceContext, rec, "用户中断更新", 15)
+		}
 		return fail("拉取镜像失败", err)
 	}
 	if canceled(serviceContext, rec) {
@@ -204,12 +242,32 @@ func UpdateContainer(serviceContext *svc.ServiceContext, rec *module.ContainerUp
 	return nil
 }
 
-// abortAndRollback 中断更新并回撤，保证不留在半截状态。
+// abortAndRollback 中断更新并恢复到更新前状态。
+// 按阶段区分语义：拉取阶段还没动过容器，只是「已中断」；
+// 一旦改过容器（停止/改名/新建），就必须回滚，避免留下半截状态。
 func abortAndRollback(ctx *svc.ServiceContext, rec *module.ContainerUpdateRecord, reason string, percent int) error {
 	ctx.UpdateProgress(rec.ID, svc.TaskProgress{
 		TaskID: rec.ID, Percentage: percent, Name: rec.ContainerName,
-		Message: reason + "，正在回撤", DetailMsg: reason, IsDone: false,
+		Message: reason, DetailMsg: reason, IsDone: false,
 	})
+
+	// 拉取阶段：容器未被触碰，直接标记中断，无需回滚
+	if rec.Phase == module.PhasePulling {
+		ctx.UpdateRecords.Update(rec.ContainerName, func(r *module.ContainerUpdateRecord) {
+			r.Status = module.StatusCanceled
+			r.Phase = module.PhaseCanceled
+			r.Error = reason
+			r.CancelRequested = false
+		})
+		ctx.UpdateProgress(rec.ID, svc.TaskProgress{
+			TaskID: rec.ID, Percentage: 0, Name: rec.ContainerName,
+			Message: "已中断更新（容器未做任何改动）", DetailMsg: reason, IsDone: true,
+		})
+		// 让本地记录的阶段与持久化保持一致
+		rec.Phase = module.PhaseCanceled
+		return nil
+	}
+
 	return Rollback(ctx, rec.ContainerName, module.StatusCanceled, reason)
 }
 
@@ -237,24 +295,30 @@ func Rollback(ctx *svc.ServiceContext, name, finalStatus, reason string) error {
 			logx.Errorf("回撤: 删除新容器 %s 失败: %v", rec.NewContainerID, err)
 		}
 	}
-	// 2. 恢复旧容器：还在（已改名）就改回原名，否则按快照重建
-	if err := restoreOriginalContainer(ctx, &rec); err != nil {
-		ctx.UpdateRecords.Update(name, func(r *module.ContainerUpdateRecord) {
-			r.Status = module.StatusFailed
-			r.Phase = module.PhaseFailed
-			r.Error = "回撤失败: " + err.Error()
-		})
+	// 2. 按阶段恢复旧容器。
+	// 只有在旧容器确实被改过名（PhaseRenamed 之后）时才需要还原/重建；
+	// 拉取/停止阶段原容器仍在原名，绝不能让「重建」把它删掉。
+	if rec.Phase == module.PhaseStopped || rec.RenamedTo == "" {
+		// 原容器未被动过：只需确保它存在
+		if _, err := cli.ContainerInspect(bg, rec.ContainerName); err != nil {
+			if err := restoreOriginalContainer(ctx, &rec); err != nil {
+				failRollback(ctx, name, "回撤失败: "+err.Error())
+				return err
+			}
+		}
+	} else if err := restoreOriginalContainer(ctx, &rec); err != nil {
+		failRollback(ctx, name, "回撤失败: "+err.Error())
 		return err
 	}
 
 	// 3. 恢复更新前的运行状态
 	if rec.WasRunning {
 		if err := cli.ContainerStart(bg, rec.ContainerName, container.StartOptions{}); err != nil {
-			ctx.UpdateRecords.Update(name, func(r *module.ContainerUpdateRecord) {
-				r.Status = module.StatusFailed
-				r.Error = "回撤后启动容器失败: " + err.Error()
-			})
-			return err
+			// 已在运行的容器启动会报 "already running"，不是错误
+			if !strings.Contains(err.Error(), "already running") {
+				failRollback(ctx, name, "回撤后启动容器失败: "+err.Error())
+				return err
+			}
 		}
 	}
 
@@ -271,12 +335,43 @@ func Rollback(ctx *svc.ServiceContext, name, finalStatus, reason string) error {
 	return nil
 }
 
+// isCanceledErr 判断错误是否来自 context 取消（用户中断拉取）。
+func isCanceledErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "operation was canceled")
+}
+
+// failRollback 记录回撤失败原因，保留可再次尝试的机会。
+func failRollback(ctx *svc.ServiceContext, name, msg string) {
+	ctx.UpdateRecords.Update(name, func(r *module.ContainerUpdateRecord) {
+		r.Status = module.StatusFailed
+		r.Phase = module.PhaseFailed
+		r.Error = msg
+	})
+}
+
 // restoreOriginalContainer 把旧容器恢复到原名并确保存在。
 func restoreOriginalContainer(ctx *svc.ServiceContext, rec *module.ContainerUpdateRecord) error {
 	cli := ctx.DockerClient
 	bg := context.Background()
 
-	// 旧容器还在：改名回原名即可
+	// 旧容器还在原名（更新尚未改名，如拉取阶段回撤）：无需任何操作。
+	// 必须先判断，否则会走到下面的重建分支删掉健康容器。
+	if rec.RenamedTo == "" {
+		if _, err := cli.ContainerInspect(bg, rec.ContainerName); err == nil {
+			return nil
+		}
+	}
+
+	// 旧容器还在（已改名）：改名回原名即可
 	if rec.RenamedTo != "" {
 		if _, err := cli.ContainerInspect(bg, rec.RenamedTo); err == nil {
 			// 原名若被残留容器占用，先移除残留（理论上新容器已删）

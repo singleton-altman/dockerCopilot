@@ -21,7 +21,9 @@ const (
 	PhaseDone      = "done"
 	PhaseRolling   = "rollingBack"
 	PhaseRolledBck = "rolledback"
-	PhaseFailed    = "failed"
+	// PhaseCanceled 表示在拉取阶段被中断，容器未被任何改动。
+	PhaseCanceled = "canceled"
+	PhaseFailed   = "failed"
 )
 
 // 更新状态
