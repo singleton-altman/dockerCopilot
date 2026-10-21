@@ -1,6 +1,7 @@
 package svc
 
 import (
+	"path/filepath"
 	"sync"
 
 	"github.com/docker/docker/client"
@@ -24,6 +25,7 @@ type ServiceContext struct {
 	ProgressStore              ProgressStoreType
 	DockerClient               *client.Client
 	ContainerStatsCache        *module.ContainerStatsCache
+	UpdateRecords              *module.UpdateRecordStore
 	ComposeStore               *composefile.Store
 	ComposeExecutor            *composefile.Executor
 	ReleaseStore               *releasewatch.Store
@@ -58,6 +60,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		ProgressStore:       make(ProgressStoreType),
 		DockerClient:        cli,
 		ContainerStatsCache: module.NewContainerStatsCache(),
+		UpdateRecords:       module.NewUpdateRecordStore(updateRecordPath(c)),
 		ComposeStore:        composefile.NewStore(c.ComposeDir()),
 		ComposeExecutor:     composefile.NewExecutor(c.ComposeDir()),
 		ReleaseStore:        releaseStore,
@@ -76,4 +79,9 @@ func (ctx *ServiceContext) GetProgress(taskID string) (TaskProgress, bool) {
 	defer ctx.mu.Unlock()
 	progress, ok := ctx.ProgressStore[taskID]
 	return progress, ok
+}
+
+// updateRecordPath 更新记录落在与关注列表相同的数据目录，随容器卷持久化。
+func updateRecordPath(c config.Config) string {
+	return filepath.Join(c.ReleaseWatchDataDir(), "container-updates.json")
 }

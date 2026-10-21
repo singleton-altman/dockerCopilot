@@ -2,12 +2,12 @@ package container
 
 import (
 	"context"
-	"github.com/google/uuid"
+	"os"
+
 	"github.com/onlyLTY/dockerCopilot/internal/svc"
 	"github.com/onlyLTY/dockerCopilot/internal/types"
 	"github.com/onlyLTY/dockerCopilot/internal/utiles"
 	"github.com/zeromicro/go-zero/core/logx"
-	"os"
 )
 
 type UpdateLogic struct {
@@ -26,23 +26,31 @@ func NewUpdateLogic(ctx context.Context, svcCtx *svc.ServiceContext) *UpdateLogi
 
 func (l *UpdateLogic) Update(req *types.ContainerUpdateReq) (resp *types.Resp, err error) {
 	resp = &types.Resp{}
-	taskID := uuid.New().String()
+
+	// 先建记录：并发校验与旧容器配置快照都在这里完成，
+	// 失败时直接返回给客户端，不产生后台任务。
+	rec, err := utiles.BeginUpdate(l.svcCtx, req.Id, req.ContainerName, req.ImageNameAndTag)
+	if err != nil {
+		resp.Code = 400
+		resp.Msg = err.Error()
+		resp.Data = map[string]interface{}{}
+		return resp, err
+	}
+
+	delOldContainer := os.Getenv("DelOldContainer") != "false"
 	go func() {
-		// Catch any panic and log the error
 		defer func() {
 			if r := recover(); r != nil {
 				l.Errorf("Recovered from panic in UpdateContainer: %v", r)
 			}
 		}()
-		imageNameAndTag := req.ImageNameAndTag
-		delOldContainer := os.Getenv("DelOldContainer") != "false"
-		err := utiles.UpdateContainer(l.svcCtx, req.Id, req.ContainerName, imageNameAndTag, delOldContainer, taskID)
-		if err != nil {
+		if err := utiles.UpdateContainer(l.svcCtx, rec, delOldContainer); err != nil {
 			l.Errorf("Error in UpdateContainer: %v", err)
 		}
 	}()
+
 	resp.Code = 200
 	resp.Msg = "success"
-	resp.Data = map[string]string{"taskID": taskID}
+	resp.Data = map[string]string{"taskID": rec.ID, "recordID": rec.ID}
 	return resp, nil
 }

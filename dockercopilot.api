@@ -183,6 +183,15 @@ service dockerCopilot {
 	@handler update
 	post /container/:id/update (ContainerUpdateReq) returns (Resp)
 
+	@handler updates
+	get /container/updates returns (Resp)
+
+	@handler cancelUpdate
+	post /container/:id/update/cancel (IdReq) returns (Resp)
+
+	@handler rollback
+	post /container/:id/rollback (IdReq) returns (Resp)
+
 	@handler backup
 	get /container/backup returns (Resp)
 
