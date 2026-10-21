@@ -44,10 +44,14 @@ func main() {
 	logx.SetLevel(logx.InfoLevel)
 
 	flag.Parse()
+	config.ApplyEnvDefaults()
 	var c config.Config
 	err := conf.Load(*configFile, &c, conf.UseEnv())
 	if err != nil {
 		logx.Errorf("无法加载配置文件出错: %v", err)
+		os.Exit(1)
+	}
+	if !c.SecretKeyValid() {
 		logx.Errorf("请确认secretKey设置正确，要求非纯数字且大于八位")
 		os.Exit(1)
 	}
