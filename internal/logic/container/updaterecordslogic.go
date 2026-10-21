@@ -16,11 +16,9 @@ type UpdateRecordView struct {
 	ContainerName   string `json:"containerName"`
 	OriginalImage   string `json:"originalImage"`
 	ImageNameAndTag string `json:"imageNameAndTag"`
-	RenamedTo       string `json:"renamedTo,omitempty"`
 	Phase           string `json:"phase"`
 	Status          string `json:"status"`
 	Error           string `json:"error,omitempty"`
-	CanRollback     bool   `json:"canRollback"`
 	CanCancel       bool   `json:"canCancel"`
 	CreatedAt       string `json:"createdAt"`
 	UpdatedAt       string `json:"updatedAt"`
@@ -36,15 +34,24 @@ func NewUpdatesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *UpdatesLo
 	return &UpdatesLogic{Logger: logx.WithContext(ctx), ctx: ctx, svcCtx: svcCtx}
 }
 
-// List 返回最近的更新记录。顺带清理过期旧容器，无需常驻后台任务。
+// List 返回最近的更新记录（含进行中与历史）。
 func (l *UpdatesLogic) List() (resp *types.Resp, err error) {
 	resp = &types.Resp{}
-	utiles.CleanupExpired(l.svcCtx)
-
 	records := l.svcCtx.UpdateRecords.List()
 	views := make([]UpdateRecordView, 0, len(records))
 	for _, rec := range records {
-		views = append(views, toRecordView(rec))
+		views = append(views, UpdateRecordView{
+			ID:              rec.ID,
+			ContainerName:   rec.ContainerName,
+			OriginalImage:   rec.OriginalImage,
+			ImageNameAndTag: rec.ImageNameAndTag,
+			Phase:           rec.Phase,
+			Status:          rec.Status,
+			Error:           rec.Error,
+			CanCancel:       rec.Status == module.StatusRunning,
+			CreatedAt:       rec.CreatedAt.Format("2006-01-02 15:04:05"),
+			UpdatedAt:       rec.UpdatedAt.Format("2006-01-02 15:04:05"),
+		})
 	}
 	resp.Code = 0
 	resp.Msg = "success"
@@ -62,8 +69,8 @@ func NewCancelLogic(ctx context.Context, svcCtx *svc.ServiceContext) *CancelLogi
 	return &CancelLogic{Logger: logx.WithContext(ctx), ctx: ctx, svcCtx: svcCtx}
 }
 
-// Cancel 中断正在进行的更新。更新协程在下一个阶段边界停止并自动回撤；
-// 已完成的更新不允许取消（应使用回撤）。
+// Cancel 中断更新。只有镜像拉取阶段可中断（容器未被改动，直接停止即可）；
+// 进入容器变更阶段后不可中断，更新会执行到底，失败时自动恢复旧容器。
 func (l *CancelLogic) Cancel(req *types.IdReq) (resp *types.Resp, err error) {
 	resp = &types.Resp{}
 	name := utiles.ResolveRecordName(l.svcCtx, req.Id)
@@ -74,82 +81,29 @@ func (l *CancelLogic) Cancel(req *types.IdReq) (resp *types.Resp, err error) {
 		resp.Data = map[string]interface{}{}
 		return resp, nil
 	}
-	switch rec.Status {
-	case module.StatusRunning:
-		l.svcCtx.UpdateRecords.RequestCancel(name)
-		// 更新协程可能已经结束，此时直接回撤，避免请求落空。
-		if latest, ok := l.svcCtx.UpdateRecords.Snapshot(name); ok &&
-			latest.Status != module.StatusRunning {
-			_ = utiles.Rollback(l.svcCtx, name, module.StatusCanceled, "用户中断更新")
+	switch rec.Phase {
+	case module.PhasePulling:
+		if rec.Status != module.StatusRunning {
+			resp.Code = 400
+			resp.Msg = "更新已结束"
+			resp.Data = map[string]interface{}{}
+			return resp, nil
 		}
+		l.svcCtx.UpdateRecords.RequestCancel(name)
 		resp.Code = 0
-		resp.Msg = "已请求中断，正在回撤"
+		resp.Msg = "已请求中断，正在停止镜像拉取"
 		resp.Data = map[string]string{"containerName": name}
 		return resp, nil
-	case module.StatusSucceeded, module.StatusFailed:
+	case module.PhaseCanceled:
 		resp.Code = 400
-		resp.Msg = "更新已结束，请使用回撤"
-		resp.Data = map[string]interface{}{}
-		return resp, nil
-	case module.StatusRolledBack, module.StatusCanceled:
-		resp.Code = 400
-		resp.Msg = "该更新已回撤或中断，无需再次取消"
+		resp.Msg = "该更新已被中断"
 		resp.Data = map[string]interface{}{}
 		return resp, nil
 	default:
+		// stopped/renamed/created/started/done：容器变更已开始，不可中断
 		resp.Code = 400
-		resp.Msg = "当前状态不可中断: " + rec.Status
+		resp.Msg = "更新已进入容器变更阶段，无法中断，请等待完成"
 		resp.Data = map[string]interface{}{}
 		return resp, nil
-	}
-}
-
-type RollbackLogic struct {
-	logx.Logger
-	ctx    context.Context
-	svcCtx *svc.ServiceContext
-}
-
-func NewRollbackLogic(ctx context.Context, svcCtx *svc.ServiceContext) *RollbackLogic {
-	return &RollbackLogic{Logger: logx.WithContext(ctx), ctx: ctx, svcCtx: svcCtx}
-}
-
-// Rollback 恢复到更新前的容器与镜像，可处理进行中、成功、失败三种状态。
-func (l *RollbackLogic) Rollback(req *types.IdReq) (resp *types.Resp, err error) {
-	resp = &types.Resp{}
-	name := utiles.ResolveRecordName(l.svcCtx, req.Id)
-	if _, ok := l.svcCtx.UpdateRecords.Snapshot(name); !ok {
-		resp.Code = 404
-		resp.Msg = "未找到该容器的更新记录"
-		resp.Data = map[string]interface{}{}
-		return resp, nil
-	}
-	finalStatus := module.StatusRolledBack
-	if err := utiles.Rollback(l.svcCtx, name, finalStatus, "用户手动回撤"); err != nil {
-		resp.Code = 400
-		resp.Msg = err.Error()
-		resp.Data = map[string]interface{}{}
-		return resp, nil
-	}
-	resp.Code = 0
-	resp.Msg = "已回撤到更新前版本"
-	resp.Data = map[string]string{"containerName": name}
-	return resp, nil
-}
-
-func toRecordView(rec module.ContainerUpdateRecord) UpdateRecordView {
-	return UpdateRecordView{
-		ID:              rec.ID,
-		ContainerName:   rec.ContainerName,
-		OriginalImage:   rec.OriginalImage,
-		ImageNameAndTag: rec.ImageNameAndTag,
-		RenamedTo:       rec.RenamedTo,
-		Phase:           rec.Phase,
-		Status:          rec.Status,
-		Error:           rec.Error,
-		CanRollback:     rec.CanRollback(),
-		CanCancel:       rec.Status == module.StatusRunning,
-		CreatedAt:       rec.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdatedAt:       rec.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
 }

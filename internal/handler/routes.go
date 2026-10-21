@@ -84,11 +84,6 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 				Handler: container.CancelUpdateHandler(serverCtx),
 			},
 			{
-				Method:  http.MethodPost,
-				Path:    "/container/:id/rollback",
-				Handler: container.RollbackHandler(serverCtx),
-			},
-			{
 				Method:  http.MethodGet,
 				Path:    "/container/backup",
 				Handler: container.BackupHandler(serverCtx),

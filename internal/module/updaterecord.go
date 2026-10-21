@@ -11,16 +11,14 @@ import (
 	"github.com/zeromicro/go-zero/core/logx"
 )
 
-// 更新阶段：回撤逻辑按阶段决定逆操作，必须按顺序推进。
+// 更新阶段
 const (
-	PhasePulling   = "pulling"
-	PhaseStopped   = "stopped"
-	PhaseRenamed   = "renamed"
-	PhaseCreated   = "created"
-	PhaseStarted   = "started"
-	PhaseDone      = "done"
-	PhaseRolling   = "rollingBack"
-	PhaseRolledBck = "rolledback"
+	PhasePulling = "pulling"
+	PhaseStopped = "stopped"
+	PhaseRenamed = "renamed"
+	PhaseCreated = "created"
+	PhaseStarted = "started"
+	PhaseDone    = "done"
 	// PhaseCanceled 表示在拉取阶段被中断，容器未被任何改动。
 	PhaseCanceled = "canceled"
 	PhaseFailed   = "failed"
@@ -28,22 +26,13 @@ const (
 
 // 更新状态
 const (
-	StatusRunning    = "running"
-	StatusSucceeded  = "succeeded"
-	StatusFailed     = "failed"
-	StatusRolledBack = "rolledback"
-	StatusCanceled   = "canceled"
+	StatusRunning   = "running"
+	StatusSucceeded = "succeeded"
+	StatusFailed    = "failed"
+	StatusCanceled  = "canceled"
 )
 
-// ContainerConfigSnapshot 旧容器的可重建配置。
-// 旧容器被删除后要靠它按原样重建，因此只保留 Create 所需的三个结构。
-type ContainerConfigSnapshot struct {
-	Config           json.RawMessage `json:"config"`
-	HostConfig       json.RawMessage `json:"hostConfig"`
-	NetworkingConfig json.RawMessage `json:"networkingConfig"`
-}
-
-// ContainerUpdateRecord 一次容器更新的完整状态，回撤依据。
+// ContainerUpdateRecord 一次容器更新的状态记录，供列表展示与中断判断。
 type ContainerUpdateRecord struct {
 	ID              string `json:"id"`
 	ContainerName   string `json:"containerName"`
@@ -53,29 +42,15 @@ type ContainerUpdateRecord struct {
 	RenamedTo       string `json:"renamedTo,omitempty"`
 	NewContainerID  string `json:"newContainerId,omitempty"`
 	ImageNameAndTag string `json:"imageNameAndTag"`
-	// WasRunning 更新前容器是否在运行，回撤时据此恢复运行/停止状态。
-	WasRunning     bool                     `json:"wasRunning"`
-	ConfigSnapshot *ContainerConfigSnapshot `json:"configSnapshot,omitempty"`
-	Phase          string                   `json:"phase"`
-	Status         string                   `json:"status"`
-	Error          string                   `json:"error,omitempty"`
-	CreatedAt      time.Time                `json:"createdAt"`
-	UpdatedAt      time.Time                `json:"updatedAt"`
-	// CancelRequested 由取消接口置位，更新协程在阶段边界检查。
+	// WasRunning 更新前容器是否在运行。
+	WasRunning bool      `json:"wasRunning"`
+	Phase      string    `json:"phase"`
+	Status     string    `json:"status"`
+	Error      string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	// CancelRequested 由取消接口置位，更新协程在拉取阶段检查。
 	CancelRequested bool `json:"-"`
-}
-
-// CanRollback 只有更新过程中或已成功/失败的记录可回撤，已回撤的不可重复回撤。
-func (r *ContainerUpdateRecord) CanRollback() bool {
-	switch r.Status {
-	case StatusSucceeded, StatusFailed, StatusCanceled:
-		return true
-	case StatusRunning:
-		// 进行中的记录通过 cancel 接口中断并回撤
-		return true
-	default:
-		return false
-	}
 }
 
 // UpdateRecordStore 更新记录存储。按容器名索引（更新期间容器名不变，ID 会变），
