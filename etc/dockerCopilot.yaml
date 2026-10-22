@@ -13,3 +13,4 @@ ReleaseWatch:
   DataDir: ${DATA_DIR}
 Compose:
   Dir: ${COMPOSE_DIR}
+  BuiltinExecutor: ${COMPOSE_BUILTIN_EXECUTOR}

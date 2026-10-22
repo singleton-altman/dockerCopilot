@@ -12,6 +12,10 @@ const (
 	EnvReleaseWatchInterval = "RELEASE_WATCH_INTERVAL_MINUTES"
 	// DefaultReleaseWatchInterval 检查间隔缺省值
 	DefaultReleaseWatchInterval = "60"
+	// EnvComposeBuiltinExecutor 是否启用内置 compose 执行器的环境变量名
+	EnvComposeBuiltinExecutor = "COMPOSE_BUILTIN_EXECUTOR"
+	// DefaultComposeBuiltinExecutor 内置执行器缺省值，默认启用
+	DefaultComposeBuiltinExecutor = "true"
 )
 
 // ApplyEnvDefaults 给 yaml 模板引用了但用户未设置的环境变量补默认值。
@@ -19,6 +23,9 @@ const (
 func ApplyEnvDefaults() {
 	if os.Getenv(EnvReleaseWatchInterval) == "" {
 		os.Setenv(EnvReleaseWatchInterval, DefaultReleaseWatchInterval)
+	}
+	if os.Getenv(EnvComposeBuiltinExecutor) == "" {
+		os.Setenv(EnvComposeBuiltinExecutor, DefaultComposeBuiltinExecutor)
 	}
 }
 
@@ -40,6 +47,9 @@ type Config struct {
 	Compose struct { // compose 文件管理
 		// Dir compose 文件存放目录，为空时用 /data/stacks
 		Dir string `json:",optional"`
+		// BuiltinExecutor 是否启用内置 compose 执行器，默认 true（由 ApplyEnvDefaults 补齐），
+		// 置 false 时仅依赖宿主机 watcher
+		BuiltinExecutor bool `json:",optional"`
 	}
 }
 

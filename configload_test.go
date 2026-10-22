@@ -27,6 +27,24 @@ func TestLoadConfigWithMissingOptionalEnv(t *testing.T) {
 	if !c.SecretKeyValid() {
 		t.Fatal("secretKey 校验应通过")
 	}
+	if !c.Compose.BuiltinExecutor {
+		t.Fatal("未设置时内置 compose 执行器应默认启用")
+	}
+}
+
+func TestLoadConfigDisableBuiltinExecutor(t *testing.T) {
+	t.Setenv("secretKey", "4sP!aX7zU")
+	t.Setenv(config.EnvComposeBuiltinExecutor, "false")
+
+	config.ApplyEnvDefaults()
+
+	var c config.Config
+	if err := conf.Load("etc/dockerCopilot.yaml", &c, conf.UseEnv()); err != nil {
+		t.Fatalf("禁用内置执行器时加载失败: %v", err)
+	}
+	if c.Compose.BuiltinExecutor {
+		t.Fatal("显式置 false 时内置执行器应关闭")
+	}
 }
 
 func TestLoadConfigWithIntervalEnv(t *testing.T) {

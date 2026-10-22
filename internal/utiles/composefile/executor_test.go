@@ -1,9 +1,14 @@
 package composefile
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 func newExecutor(t *testing.T) *Executor {
@@ -129,5 +134,152 @@ func TestRecentReturnsNewestFirst(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].ID != "b" {
 		t.Fatalf("unexpected order: %+v", results)
+	}
+}
+
+func queueJob(t *testing.T, ex *Executor, job Job) {
+	t.Helper()
+	content, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(ex.workDir, QueueDirName, job.ID+".json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConsumerExecutesQueuedJob(t *testing.T) {
+	ex := newExecutor(t)
+	ex.runner = func(ctx context.Context, job Job) JobResult {
+		return JobResult{Success: true, Output: "ran " + string(job.Action)}
+	}
+	id, err := ex.Submit("web.yaml", ActionUp)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+
+	ex.drainOnce(context.Background())
+
+	entries, err := os.ReadDir(filepath.Join(ex.workDir, QueueDirName))
+	if err != nil {
+		t.Fatalf("queue dir missing: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			t.Fatalf("queue not drained: %v", entry.Name())
+		}
+	}
+
+	result, done, err := ex.Result(id)
+	if err != nil || !done {
+		t.Fatalf("expected finished result, done=%v err=%v", done, err)
+	}
+	if !result.Success || result.Output != "ran up" || result.Filename != "web.yaml" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestConsumerSkipsExpiredJob(t *testing.T) {
+	ex := newExecutor(t)
+	ex.runner = func(ctx context.Context, job Job) JobResult {
+		t.Fatal("expired job must not run")
+		return JobResult{}
+	}
+	job := Job{ID: "1-expired-web", Filename: "web.yaml", Action: ActionUp,
+		CreatedAt: time.Now().Add(-2 * jobMaxAge)}
+	queueJob(t, ex, job)
+
+	ex.drainOnce(context.Background())
+
+	result, done, err := ex.Result(job.ID)
+	if err != nil || !done {
+		t.Fatalf("expected finished result, done=%v err=%v", done, err)
+	}
+	if result.Success || !strings.Contains(result.Output, "过期") {
+		t.Fatalf("expected expired failure, got %+v", result)
+	}
+}
+
+func TestConsumerRejectsInvalidJob(t *testing.T) {
+	ex := newExecutor(t)
+	ex.runner = func(ctx context.Context, job Job) JobResult {
+		t.Fatal("invalid job must not run")
+		return JobResult{}
+	}
+	job := Job{ID: "1-bad-web", Filename: "../escape.yaml", Action: ActionUp,
+		CreatedAt: time.Now()}
+	queueJob(t, ex, job)
+
+	ex.drainOnce(context.Background())
+
+	result, done, err := ex.Result(job.ID)
+	if err != nil || !done {
+		t.Fatalf("expected finished result, done=%v err=%v", done, err)
+	}
+	if result.Success {
+		t.Fatalf("expected rejection, got %+v", result)
+	}
+
+	job = Job{ID: "1-bad2-web", Filename: "web.yaml", Action: Action("rm -rf /"),
+		CreatedAt: time.Now()}
+	queueJob(t, ex, job)
+	ex.drainOnce(context.Background())
+	result, done, err = ex.Result(job.ID)
+	if err != nil || !done || result.Success {
+		t.Fatalf("expected action rejection, done=%v result=%+v err=%v", done, result, err)
+	}
+}
+
+func TestConsumerSkipsJobClaimedByOthers(t *testing.T) {
+	ex := newExecutor(t)
+	id, err := ex.Submit("web.yaml", ActionUp)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+	// 模拟外部 watcher 先把任务取走
+	queuePath := filepath.Join(ex.workDir, QueueDirName, id+".json")
+	if err := os.Rename(queuePath, queuePath+".claim"); err != nil {
+		t.Fatal(err)
+	}
+
+	ex.drainOnce(context.Background())
+
+	if _, done, _ := ex.Result(id); done {
+		t.Fatal("should not produce result for a job claimed elsewhere")
+	}
+}
+
+func TestPruneResultsKeepsRecent(t *testing.T) {
+	ex := newExecutor(t)
+	dir := filepath.Join(ex.workDir, ResultDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < resultKeep+10; i++ {
+		payload := `{"id":"r` + string(rune('a'+i%26)) + strconv.Itoa(i) + `","success":true,"finishedAt":"` +
+			base.Add(time.Duration(i)*time.Minute).Format(time.RFC3339) + `"}`
+		name := filepath.Join(dir, "r"+strconv.Itoa(i)+".json")
+		if err := os.WriteFile(name, []byte(payload), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ex.pruneResults()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != resultKeep {
+		t.Fatalf("expected %d results, got %d", resultKeep, len(entries))
+	}
+	// 被删掉的应是最旧的
+	if _, err := os.Stat(filepath.Join(dir, "r0.json")); !os.IsNotExist(err) {
+		t.Fatal("oldest result should be pruned")
 	}
 }

@@ -76,6 +76,7 @@ services:
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon 地址 |
 | `BACKUP_DIR` | `/data/backups` | 容器备份目录 |
 | `COMPOSE_DIR` | `/data/stacks` | compose 文件目录 |
+| `COMPOSE_BUILTIN_EXECUTOR` | `true` | 是否启用内置 compose 执行器；置 `false` 时仅依赖宿主机 watcher |
 | `RELEASE_WATCH_INTERVAL_MINUTES` | `60` | 发布检查间隔，最小 5 分钟 |
 | `GITHUB_TOKEN` | 空 | 提高 GitHub API 频率上限 |
 | `DelOldContainer` | `true` | 更新容器后是否删除旧容器（旧容器会先以 `原名-时间戳` 备份，成功后删除） |
@@ -181,7 +182,7 @@ compose 文件存放在 `COMPOSE_DIR`（默认 `/data/stacks`），目录结构�
 ├── .trash/                  # 软删除的文件，可恢复
 ├── .history.jsonl           # 版本历史，最多 200 条
 ├── .queue/                  # 待执行请求（服务端写入）
-└── .results/                # 执行结果（watcher 写入）
+└── .results/                # 执行结果（内置执行器或 watcher 写入）
 ```
 
 - 覆盖保存前会先备份旧内容，**备份失败则取消保存**
@@ -214,19 +215,19 @@ DB_PASSWORD=change_me
   不会等到执行时才失败
 - 带默认值的写法 `${VAR:-default}` 始终允许
 
-**注意**：校验使用服务端容器内 `/data/stacks/.env`，而实际执行由宿主机上的
-`docker compose` 完成，它读取的是宿主机侧的 `.env` 与进程环境变量。
-请确保两边一致，否则可能出现「校验通过但执行失败」。
+**注意**：校验使用服务端容器内 `/data/stacks/.env`；实际执行时 compose 同样
+在容器内读取该目录的 `.env` 与进程环境变量，两边保持一致。若改用宿主机
+watcher 执行，则读取的是宿主机侧的 `.env`，请确保两边一致，
+否则可能出现「校验通过但执行失败」。
 
 ## Compose 执行
 
-服务端容器只挂载 `docker.sock`，没有 compose 二进制，也不应直接执行 compose 命令。
-因此执行拆成两段：
+服务端容器不直接调用宿主机的 compose 二进制，执行拆成两段：
 
 ```
 客户端 → 服务端（写 .queue/{jobId}.json）
                   ↓
-         宿主机 watcher 轮询
+         内置执行器轮询（容器内 docker compose，经挂载的 docker.sock）
                   ↓
          docker compose -f ... up -d
                   ↓
@@ -235,22 +236,29 @@ DB_PASSWORD=change_me
 客户端 ← GET /api/compose/job?jobId=
 ```
 
-在宿主机上启动 watcher：
+**内置执行器（默认）**：镜像自带 docker CLI 与 compose 插件，通过挂载的
+`docker.sock` 操作宿主机 Docker，普通安装（含 NAS）开箱即用，无需在宿主机
+部署任何东西。可用 `COMPOSE_BUILTIN_EXECUTOR=false` 关闭。
 
-```bash
-COMPOSE_WATCH_DIR=/path/to/data/stacks ./compose-watcher.sh
-```
-
-watcher 的行为：
+内置执行器的行为：
 
 - 只接受 `up` / `down` / `restart` / `pull`
-- 二次校验文件名与动作白名单
-- 超过 5 分钟的请求视为过期，不执行
-- 使用 `--project-directory` 指定 stacks 目录，保证相对路径一致
+- 消费侧二次校验文件名与动作白名单，不信任投递内容
+- 超过 5 分钟的请求视为过期，直接写失败结果，不执行
+- 单条命令 10 分钟执行超时
 - 结果只保留最近 50 条
+- `up` 时附带 `--remove-orphans`
 
-**注意**：watcher 停止时，界面上的执行按钮只会写入队列文件，不会真正执行。
-生产环境建议用 systemd / launchd 托管。
+**外部 watcher（可选）**：宿主机侧 watcher 仍可消费同一队列，与内置执行器
+靠文件原子认领共存，谁先认领谁执行，不会重复执行。设置
+`COMPOSE_WATCH_DIR=/path/to/data/stacks` 后启动 watcher 即可。
+
+**注意**：在容器内执行时，compose 文件里的**相对路径 bind 挂载**（如
+`./config:/config`）会相对 `COMPOSE_DIR` 在容器内的位置解析。建议 compose
+里使用宿主机绝对路径或具名卷，避免宿主机与容器路径视角不一致。
+
+**注意**：内置执行器关闭且宿主机 watcher 未运行时，界面上的执行按钮只会
+写入队列文件，不会真正执行，客户端会一直显示「等待宿主机执行」直到超时。
 
 ## 开发环境
 
@@ -359,9 +367,9 @@ GitHub 仓库 → **Actions → Publish Docker Image → Run workflow**：
 ## 安全说明
 
 - 挂载 `docker.sock` 等价于宿主机 root 权限，**不要暴露到公网**
-- compose 文件与执行请求都做文件名、动作白名单校验
+- compose 文件与执行请求都做文件名、动作白名单校验，消费侧还有二次校验
 - 关注仓库的请求地址固定为 `https://api.github.com`
-- compose 执行的实际权限由宿主机 watcher 承担，服务端不执行任意命令
+- compose 执行命令由固定白名单拼装，服务端不执行任意命令
 
 ## 关于本 Fork
 

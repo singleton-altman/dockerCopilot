@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"flag"
 	"fmt"
@@ -70,6 +71,12 @@ func main() {
 	// 启动关注仓库的发布监控（后台定时检查）
 	ctx.ReleaseWatcher.Start()
 	defer ctx.ReleaseWatcher.Stop()
+
+	// 启动内置 compose 执行器：消费 .queue 里的执行请求，
+	// 容器内通过挂载的 docker.sock 执行，无需宿主机侧 watcher
+	if c.Compose.BuiltinExecutor {
+		ctx.ComposeExecutor.Start(context.Background())
+	}
 
 	// Ensure data directory and config exist (Auto-init)
 	dataDir := "/data/config/image"

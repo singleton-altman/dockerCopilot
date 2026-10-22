@@ -9,7 +9,8 @@ COPY dc-back/dist/$TARGETPLATFORM/dockerCopilot ./dockerCopilot
 COPY dc-back/etc/. ./etc
 COPY start.sh ./start.sh
 
-RUN apk add --no-cache tzdata \
+# docker-cli + compose 插件：内置 compose 执行器通过挂载的 docker.sock 执行任务
+RUN apk add --no-cache tzdata docker-cli docker-cli-compose \
     && chmod +x start.sh \
     && chmod +x dockerCopilot
 
