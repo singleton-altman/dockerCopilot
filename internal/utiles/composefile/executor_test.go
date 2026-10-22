@@ -253,6 +253,38 @@ func TestConsumerSkipsJobClaimedByOthers(t *testing.T) {
 	}
 }
 
+func TestRunComposeArgAssembly(t *testing.T) {
+	ex := newExecutor(t)
+	// 用假 docker 脚本回显参数，验证 composeCmd 不会重复拼进 args
+	bin := t.TempDir() + "/docker"
+	script := "#!/bin/sh\necho \"ARGS:$*\"\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ex.composeCmd = []string{bin, "compose"}
+
+	result := ex.runCompose(context.Background(), Job{ID: "1", Filename: "web.yaml", Action: ActionUp})
+	if !result.Success {
+		t.Fatalf("expected success, got: %s", result.Output)
+	}
+	// 第一个参数必须是 compose 子命令，不能重复出现二进制名
+	if !strings.HasPrefix(result.Output, "ARGS:compose -f ") {
+		t.Fatalf("args should start with compose subcommand, got: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "--project-directory "+ex.workDir) {
+		t.Fatalf("missing project-directory, got: %s", result.Output)
+	}
+
+	ex.composeCmd = []string{bin}
+	result = ex.runCompose(context.Background(), Job{ID: "2", Filename: "web.yaml", Action: ActionUp})
+	if !result.Success {
+		t.Fatalf("standalone compose should work, got: %s", result.Output)
+	}
+	if !strings.HasPrefix(result.Output, "ARGS:-f ") {
+		t.Fatalf("standalone compose args should start with -f, got: %s", result.Output)
+	}
+}
+
 func TestPruneResultsKeepsRecent(t *testing.T) {
 	ex := newExecutor(t)
 	dir := filepath.Join(ex.workDir, ResultDirName)

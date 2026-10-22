@@ -364,7 +364,8 @@ func (e *Executor) runCompose(ctx context.Context, job Job) JobResult {
 	execCtx, cancel := context.WithTimeout(ctx, composeExecTimeout)
 	defer cancel()
 
-	args := append([]string{}, e.composeCmd...)
+	// composeCmd[0] 是二进制本体，由 exec.Command 的 path 参数承担，args 从子命令开始
+	args := append([]string{}, e.composeCmd[1:]...)
 	args = append(args, "-f", filepath.Join(e.workDir, job.Filename),
 		"--project-directory", e.workDir)
 	switch job.Action {
