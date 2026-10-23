@@ -37,3 +37,7 @@ __pycache__/
 .env
 .env.local
 .env.*.local
+
+# 本地自测：Docker 构建上下文与临时数据
+/dc-back/
+/.local-test/

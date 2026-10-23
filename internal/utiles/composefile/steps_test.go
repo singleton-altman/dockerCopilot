@@ -50,7 +50,7 @@ Error response from daemon: pull access denied for a
 
 func TestSummarizePullAllSuccess(t *testing.T) {
 	output := " Image a:1 Pulling \n Image a:1 Pulled \n Image b:2 Pulled \n"
-	step, _ := summarizePull(output)
+	step, _ := summarizePull(output, nil)
 	if step.Status != "success" {
 		t.Fatalf("expected success, got %+v", step)
 	}
@@ -61,7 +61,7 @@ func TestSummarizePullAllSuccess(t *testing.T) {
 
 func TestSummarizePullPartialFailure(t *testing.T) {
 	output := " Image a:1 Pulled \n Image b:2 Error pull access denied\n"
-	step, _ := summarizePull(output)
+	step, _ := summarizePull(output, nil)
 	if step.Status != "warning" {
 		t.Fatalf("expected warning, got %+v", step)
 	}
@@ -75,7 +75,7 @@ func TestSummarizePullPartialFailure(t *testing.T) {
 }
 
 func TestSummarizePullSkipped(t *testing.T) {
-	step, _ := summarizePull(" Image a:1 Skipped \n")
+	step, _ := summarizePull(" Image a:1 Skipped \n", nil)
 	if step.Status != "success" || !strings.Contains(step.Message, "跳过") {
 		t.Fatalf("expected skipped summary, got %+v", step)
 	}
@@ -119,20 +119,62 @@ func TestSummarizeUpMixed(t *testing.T) {
 }
 
 func TestSummarizeSinglePullMarksFailure(t *testing.T) {
-	steps := summarizeSingle(ActionPull, " Image a:1 Error boom\n", false)
+	steps := summarizeSingle(ActionPull, " Image a:1 Error boom\n", false, nil)
 	if len(steps) != 1 || steps[0].Status != "failed" {
 		t.Fatalf("expected failed pull step, got %+v", steps)
 	}
 }
 
-func TestAllPulled(t *testing.T) {
-	if allPulled([]imagePullOutcome{{Status: "pulled"}}) != true {
-		t.Error("single pulled image should be allPulled")
+// 声明了 build 的服务 registry 上本就没有镜像，拉取失败是预期，
+// 不能报成警告，也不该建议用户去检查仓库权限。
+func TestSummarizePullTreatsBuildableAsExpected(t *testing.T) {
+	output := ` Image nginx:alpine Pulling 
+ Image nginx:alpine Pulled 
+ Image dc_test_local:v1 Pulling 
+ Image dc_test_local:v1 pull access denied for dc_test_local, repository does not exist
+`
+	buildable := map[string]bool{"dc_test_local:v1": true}
+	step, _ := summarizePull(output, buildable)
+	if step.Status != "success" {
+		t.Fatalf("buildable image failure should not warn, got %+v", step)
 	}
-	if allPulled([]imagePullOutcome{{Status: "pulled"}, {Status: "failed"}}) {
-		t.Error("mixed outcomes must not be allPulled")
+	if !strings.Contains(step.Message, "已拉取 1 个镜像") {
+		t.Errorf("should report pulled count, got: %s", step.Message)
 	}
-	if allPulled(nil) {
-		t.Error("empty outcomes must not be allPulled")
+	if !strings.Contains(step.Message, "本地构建镜像") {
+		t.Errorf("should mention buildable image, got: %s", step.Message)
+	}
+	if strings.Contains(step.Message, "拉取失败") {
+		t.Errorf("buildable image must not be reported as failure, got: %s", step.Message)
+	}
+}
+
+func TestSummarizePullBuildableOnly(t *testing.T) {
+	output := " Image dc_local:v1 pull access denied for dc_local\n"
+	step, _ := summarizePull(output, map[string]bool{"dc_local:v1": true})
+	if step.Status != "success" {
+		t.Fatalf("only buildable images should succeed, got %+v", step)
+	}
+	if !strings.Contains(step.Message, "本地构建镜像") {
+		t.Errorf("unexpected message: %s", step.Message)
+	}
+}
+
+func TestRealPullFailures(t *testing.T) {
+	outcomes := []imagePullOutcome{
+		{Image: "a:1", Status: "pulled"},
+		{Image: "b:2", Status: "failed"},
+	}
+	failed := realPullFailures(outcomes, nil)
+	if len(failed) != 1 || failed[0] != "b:2" {
+		t.Fatalf("unexpected failed images: %v", failed)
+	}
+	if len(realPullFailures(nil, nil)) != 0 {
+		t.Error("no outcomes should yield no failures")
+	}
+	// 构建型镜像的失败不算真实失败
+	buildable := map[string]bool{"b:2": true}
+	if len(realPullFailures(outcomes, buildable)) != 0 {
+		t.Error("buildable image failure must be excluded")
 	}
 }

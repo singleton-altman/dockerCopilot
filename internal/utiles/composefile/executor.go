@@ -371,7 +371,8 @@ func (e *Executor) claimAndRun(ctx context.Context, id string) {
 	// 单动作任务（up/down/restart/pull）在这里补过程结论；
 	// deploy 由 runJob 自己生成 pull/up 两段，避免重复覆盖。
 	if len(result.Steps) == 0 {
-		result.Steps = summarizeSingle(job.Action, result.Output, result.Success)
+		result.Steps = summarizeSingle(job.Action, result.Output, result.Success,
+			buildableImages(e.workDir, job.Filename))
 	}
 	if len(result.Output) > e.maxOutput {
 		result.Output = result.Output[:e.maxOutput] + "\n...(已截断)"
@@ -443,7 +444,9 @@ func (e *Executor) runJob(ctx context.Context, job Job) JobResult {
 	}
 	// 用 pull 的输出判断「到底有没有拉到新镜像」，而不是看退出码：
 	// --ignore-pull-failures 让 pull 恒返回 0，退出码反映不了真实结果。
-	pullStep, outcomes := summarizePull(pullResult.Output)
+	// 声明了 build 的镜像 registry 上本来就没有，拉取失败是预期，不计入警告。
+	buildable := buildableImages(e.workDir, job.Filename)
+	pullStep, outcomes := summarizePull(pullResult.Output, buildable)
 	// 命令本身失败（--ignore-pull-failures 吞不掉的情形）必须标成 failed
 	if !pullResult.Success {
 		pullStep.Status = "failed"
@@ -454,39 +457,48 @@ func (e *Executor) runJob(ctx context.Context, job Job) JobResult {
 	}
 	result.Steps = []JobStep{pullStep, upStep}
 
-	if pullStep.Status != "success" {
+	if pullStep.Status == "warning" || pullStep.Status == "failed" {
 		// deploy 里 pull 失败不阻断启动，这里补上后续行为，让用户知道发生了什么
 		result.Steps[0].Message += "；已改用本地已有镜像启动"
 		result.Output += "\n提示: " + result.Steps[0].Message
 	}
-	// 拉取全部失败且容器没有任何变化时，明确告诉用户「其实没更新」
-	if upStep.Status == "success" && isAllUnchanged(upStep.Message) && !allPulled(outcomes) {
-		result.Steps = append(result.Steps, JobStep{
-			Stage:   "result",
-			Status:  "warning",
-			Message: "容器未重建，仍在运行原有镜像；如需强制更新请确认镜像 tag 已变更或选择拉取最新",
-		})
+
+	// 容器没重建时给个结论。区分两种情况，避免误导：
+	//   1. 确实有镜像拉取失败 → 可能拉不到新版本
+	//   2. 镜像都拉取成功（或只有本地构建镜像）→ 本来就是最新，属于正常结果
+	if upStep.Status == "success" && isAllUnchanged(upStep.Message) {
+		if len(realPullFailures(outcomes, buildable)) > 0 {
+			result.Steps = append(result.Steps, JobStep{
+				Stage:   "result",
+				Status:  "warning",
+				Message: "有镜像拉取失败，容器未重建，可能仍在运行旧版本；请检查镜像地址与仓库权限",
+			})
+		} else {
+			result.Steps = append(result.Steps, JobStep{
+				Stage:   "result",
+				Status:  "success",
+				Message: "镜像已是最新，容器无需重建",
+			})
+		}
 	}
 	return result
+}
+
+// realPullFailures 返回真正拉取失败的镜像，排除声明了 build 的本地构建镜像。
+func realPullFailures(outcomes []imagePullOutcome, buildable map[string]bool) []string {
+	var failed []string
+	for _, item := range outcomes {
+		if item.Status == "failed" && !buildable[item.Image] {
+			failed = append(failed, item.Image)
+		}
+	}
+	return failed
 }
 
 // isAllUnchanged 判断 up 摘要是否只有「无变化」的容器。
 func isAllUnchanged(message string) bool {
 	return strings.Contains(message, "无变化") && !strings.Contains(message, "已重建") &&
 		!strings.Contains(message, "已创建") && !strings.Contains(message, "已启动")
-}
-
-// allPulled 判断所有镜像是否都成功拉取。
-func allPulled(outcomes []imagePullOutcome) bool {
-	if len(outcomes) == 0 {
-		return false
-	}
-	for _, item := range outcomes {
-		if item.Status != "pulled" {
-			return false
-		}
-	}
-	return true
 }
 
 // writeResult 落盘结果并清理过期记录。

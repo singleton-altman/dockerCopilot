@@ -134,16 +134,22 @@ func isImageReference(token string) bool {
 }
 
 // summarizePull 把拉取结果整理成一条用户可读的结论。
-func summarizePull(output string) (step JobStep, outcomes []imagePullOutcome) {
+// buildable 里的镜像是 compose 里声明了 build 的服务，registry 上本就不存在，
+// 拉取失败属于预期，不应报成警告。
+func summarizePull(output string, buildable map[string]bool) (step JobStep, outcomes []imagePullOutcome) {
 	outcomes = parsePullOutput(output)
 
-	var pulled, failed, skipped []string
+	var pulled, failed, skipped, buildOnly []string
 	for _, item := range outcomes {
 		switch item.Status {
 		case "pulled":
 			pulled = append(pulled, item.Image)
 		case "failed":
-			failed = append(failed, item.Image)
+			if buildable[item.Image] {
+				buildOnly = append(buildOnly, item.Image)
+			} else {
+				failed = append(failed, item.Image)
+			}
 		case "skipped":
 			skipped = append(skipped, item.Image)
 		}
@@ -156,11 +162,22 @@ func summarizePull(output string) (step JobStep, outcomes []imagePullOutcome) {
 		step.Message = "拉取阶段没有可识别的镜像输出，请查看原始输出"
 	case len(failed) == 0:
 		step.Status = "success"
-		msg := fmt.Sprintf("已拉取 %d 个镜像", len(pulled))
-		if len(skipped) > 0 {
-			msg += fmt.Sprintf("，%d 个按配置跳过", len(skipped))
+		parts := make([]string, 0, 3)
+		if len(pulled) > 0 {
+			parts = append(parts, fmt.Sprintf("已拉取 %d 个镜像", len(pulled)))
 		}
-		step.Message = msg
+		if len(buildOnly) > 0 {
+			parts = append(parts, fmt.Sprintf("%d 个为本地构建镜像（%s）",
+				len(buildOnly), strings.Join(buildOnly, "、")))
+		}
+		if len(skipped) > 0 {
+			parts = append(parts, fmt.Sprintf("%d 个按配置跳过", len(skipped)))
+		}
+		if len(parts) == 0 {
+			step.Message = "没有需要拉取的镜像"
+		} else {
+			step.Message = strings.Join(parts, "；")
+		}
 	default:
 		step.Status = "warning"
 		// 不在这里断言「将使用本地镜像」：纯 pull 动作不会启动容器，
@@ -286,9 +303,9 @@ func summarizeUp(output string) JobStep {
 }
 
 // summarizeSingle 为单动作任务生成一条结论。
-func summarizeSingle(action Action, output string, success bool) []JobStep {
+func summarizeSingle(action Action, output string, success bool, buildable map[string]bool) []JobStep {
 	if action == ActionPull {
-		step, _ := summarizePull(output)
+		step, _ := summarizePull(output, buildable)
 		// 命令失败就一定是失败，即使输出里认不出是哪个镜像
 		if !success {
 			step.Status = "failed"
