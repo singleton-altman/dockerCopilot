@@ -54,6 +54,12 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	checker := releasewatch.NewChecker(releaseStore, c.ReleaseWatch.GitHubToken)
 	watcher := releasewatch.NewWatcher(checker, c.CheckInterval())
 
+	// 执行器需要 docker client 精确识别容器归属，避免误删其他 compose 文件的容器
+	composeExecutor := composefile.NewExecutor(c.ComposeDir())
+	if cli != nil {
+		composeExecutor = composeExecutor.WithDockerClient(cli)
+	}
+
 	return &ServiceContext{
 		Config:              c,
 		HubImageInfo:        module.NewImageCheck(),
@@ -62,7 +68,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		ContainerStatsCache: module.NewContainerStatsCache(),
 		UpdateRecords:       module.NewUpdateRecordStore(updateRecordPath(c)),
 		ComposeStore:        composefile.NewStore(c.ComposeDir()),
-		ComposeExecutor:     composefile.NewExecutor(c.ComposeDir()),
+		ComposeExecutor:     composeExecutor,
 		ReleaseStore:        releaseStore,
 		ReleaseWatcher:      watcher,
 	}

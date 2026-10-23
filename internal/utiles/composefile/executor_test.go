@@ -285,6 +285,57 @@ func TestRunComposeArgAssembly(t *testing.T) {
 	}
 }
 
+// up 不再带 --remove-orphans：同目录下多个 compose 文件共用默认 project 名，
+// 该参数会把别的文件创建的容器当孤儿删掉（线上已复现过误删）。
+func TestUpDoesNotUseRemoveOrphans(t *testing.T) {
+	ex := newExecutor(t)
+	logFile := filepath.Join(t.TempDir(), "calls.log")
+	bin := filepath.Join(t.TempDir(), "docker")
+	script := "#!/bin/sh\necho \"$*\" >> " + logFile + "\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ex.composeCmd = []string{bin}
+	// 没有 docker client，孤儿清理会跳过
+	result := ex.runCompose(context.Background(), Job{ID: "1", Filename: "web.yaml", Action: ActionUp})
+	if !result.Success {
+		t.Fatalf("expected success, got %s", result.Output)
+	}
+	content, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "--remove-orphans") {
+		t.Fatalf("up must not pass --remove-orphans, got: %s", content)
+	}
+}
+
+func TestParseServiceNames(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.yaml")
+	content := "services:\n  web:\n    image: nginx\n  db:\n    image: postgres\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	names, err := parseServiceNames(path)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	got := map[string]bool{}
+	for _, name := range names {
+		got[name] = true
+	}
+	if !got["web"] || !got["db"] || len(got) != 2 {
+		t.Fatalf("unexpected services: %v", names)
+	}
+}
+
+func TestParseServiceNamesMissingFile(t *testing.T) {
+	if _, err := parseServiceNames(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
 func TestDeployPullsThenStarts(t *testing.T) {
 	ex := newExecutor(t)
 	// 假 docker 记录每次调用的参数，用来验证 deploy 的执行顺序与参数
@@ -312,8 +363,12 @@ func TestDeployPullsThenStarts(t *testing.T) {
 	if !strings.Contains(calls[0], "pull") || !strings.Contains(calls[0], "--ignore-pull-failures") {
 		t.Fatalf("first call should be pull with --ignore-pull-failures, got: %s", calls[0])
 	}
-	if !strings.Contains(calls[1], "up -d --remove-orphans") {
+	if !strings.Contains(calls[1], "up -d") {
 		t.Fatalf("second call should be up -d, got: %s", calls[1])
+	}
+	// --remove-orphans 会误删同目录下其他 compose 文件的容器，必须不再使用
+	if strings.Contains(calls[1], "--remove-orphans") {
+		t.Fatalf("up must not pass --remove-orphans, got: %s", calls[1])
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/docker/client"
 	"github.com/zeromicro/go-zero/core/logx"
 )
 
@@ -104,6 +105,8 @@ type Executor struct {
 	composeCmd []string
 	// runner 执行单个任务，测试时可替换。
 	runner func(ctx context.Context, job Job) JobResult
+	// docker 用于精确识别容器归属；为 nil 时跳过孤儿清理（宁可留孤儿也不误删）。
+	docker *client.Client
 }
 
 func NewExecutor(workDir string) *Executor {
@@ -114,6 +117,13 @@ func NewExecutor(workDir string) *Executor {
 		maxPending: 16,
 		maxOutput:  8 * 1024,
 	}
+}
+
+// WithDockerClient 注入 docker client，用于精确识别容器归属。
+// 不注入时跳过孤儿清理，宁可留下孤儿容器也不误删。
+func (e *Executor) WithDockerClient(cli *client.Client) *Executor {
+	e.docker = cli
+	return e
 }
 
 func (e *Executor) ensureDirs() error {
@@ -386,13 +396,21 @@ func (e *Executor) runCompose(ctx context.Context, job Job) JobResult {
 	execCtx, cancel := context.WithTimeout(ctx, composeExecTimeout)
 	defer cancel()
 
+	// up 之前先做一次精确的孤儿清理，替代 --remove-orphans
+	if job.Action == ActionUp {
+		e.cleanOwnOrphans(execCtx, job)
+	}
+
 	// composeCmd[0] 是二进制本体，由 exec.Command 的 path 参数承担，args 从子命令开始
 	args := append([]string{}, e.composeCmd[1:]...)
 	args = append(args, "-f", filepath.Join(e.workDir, job.Filename),
 		"--project-directory", e.workDir)
 	switch job.Action {
 	case ActionUp:
-		args = append(args, "up", "-d", "--remove-orphans")
+		// 不用 --remove-orphans：同一 COMPOSE_DIR 下的多个 compose 文件
+		// 默认共用目录名作为 project，该参数会把其他文件的容器当孤儿删掉。
+		// 改为 up 前只清理「本文件曾经定义、现在已移除」的服务容器。
+		args = append(args, "up", "-d")
 	case ActionDown:
 		args = append(args, "down")
 	case ActionRestart:

@@ -7,6 +7,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// parseServiceNames 返回 compose 文件里声明的所有服务名。
+func parseServiceNames(path string) ([]string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var doc struct {
+		Services map[string]yaml.Node `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(content, &doc); err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(doc.Services))
+	for name := range doc.Services {
+		names = append(names, name)
+	}
+	return names, nil
+}
+
 // buildableImages 读取 compose 文件，返回声明了 build 的服务所用的镜像名。
 //
 // 这类镜像 registry 上本来就不存在，pull 必然失败；把它和「真的拉不下来」
