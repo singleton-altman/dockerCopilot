@@ -285,6 +285,79 @@ func TestRunComposeArgAssembly(t *testing.T) {
 	}
 }
 
+func TestDeployPullsThenStarts(t *testing.T) {
+	ex := newExecutor(t)
+	// 假 docker 记录每次调用的参数，用来验证 deploy 的执行顺序与参数
+	logFile := filepath.Join(t.TempDir(), "calls.log")
+	bin := filepath.Join(t.TempDir(), "docker")
+	script := "#!/bin/sh\necho \"$*\" >> " + logFile + "\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ex.composeCmd = []string{bin, "compose"}
+
+	result := ex.runJob(context.Background(), Job{ID: "1", Filename: "web.yaml", Action: ActionDeploy})
+	if !result.Success {
+		t.Fatalf("expected success, got: %s", result.Output)
+	}
+
+	content, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(calls) != 2 {
+		t.Fatalf("expected pull then up, got %d calls: %v", len(calls), calls)
+	}
+	if !strings.Contains(calls[0], "pull") || !strings.Contains(calls[0], "--ignore-pull-failures") {
+		t.Fatalf("first call should be pull with --ignore-pull-failures, got: %s", calls[0])
+	}
+	if !strings.Contains(calls[1], "up -d --remove-orphans") {
+		t.Fatalf("second call should be up -d, got: %s", calls[1])
+	}
+}
+
+func TestDeployKeepsRunningWhenPullFails(t *testing.T) {
+	ex := newExecutor(t)
+	// pull 失败、up 成功：整体应判成功，并提示拉取阶段有问题
+	bin := filepath.Join(t.TempDir(), "docker")
+	script := "#!/bin/sh\ncase \"$*\" in *pull*) echo 'pull failed'; exit 1;; esac\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ex.composeCmd = []string{bin, "compose"}
+
+	result := ex.runJob(context.Background(), Job{ID: "1", Filename: "web.yaml", Action: ActionDeploy})
+	if !result.Success {
+		t.Fatalf("up succeeded, deploy should succeed: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "拉取阶段未完全成功") {
+		t.Fatalf("expected pull warning, got: %s", result.Output)
+	}
+}
+
+func TestDeployFailsWhenUpFails(t *testing.T) {
+	ex := newExecutor(t)
+	bin := filepath.Join(t.TempDir(), "docker")
+	script := "#!/bin/sh\ncase \"$*\" in *up*) echo 'up failed'; exit 1;; esac\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ex.composeCmd = []string{bin, "compose"}
+
+	result := ex.runJob(context.Background(), Job{ID: "1", Filename: "web.yaml", Action: ActionDeploy})
+	if result.Success {
+		t.Fatalf("up failed, deploy must fail: %s", result.Output)
+	}
+}
+
+func TestDeployAcceptedBySubmit(t *testing.T) {
+	ex := newExecutor(t)
+	if _, err := ex.Submit("web.yaml", ActionDeploy); err != nil {
+		t.Fatalf("deploy should be a valid action: %v", err)
+	}
+}
+
 func TestPruneResultsKeepsRecent(t *testing.T) {
 	ex := newExecutor(t)
 	dir := filepath.Join(ex.workDir, ResultDirName)

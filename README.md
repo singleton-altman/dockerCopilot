@@ -146,13 +146,16 @@ POST   /api/compose/restore        {"name"}
 ### Compose 执行
 
 ```
-POST /api/compose/deploy    {"filename","action"}   action: up|down|restart|pull
+POST /api/compose/deploy    {"filename","action"}   action: deploy|up|down|restart|pull
 GET  /api/compose/job?jobId=
 GET  /api/compose/history
 ```
 
-执行采用**投递式**设计：服务端只把请求写入队列，不直接调用 docker。
-实际执行由宿主机侧的 watcher 完成，详见下方「Compose 执行」。
+`deploy` 是复合动作，等价于「先拉取镜像再启动」，用于更新镜像后立即生效。
+拉取阶段允许个别镜像失败（如只有 build 没有 image 的服务），最终成败以启动结果为准。
+
+执行采用**投递式**设计：请求先写入队列，再由内置执行器（或宿主机侧 watcher）
+消费执行，详见下方「Compose 执行」。
 
 ### 发布监控
 
@@ -229,7 +232,7 @@ watcher 执行，则读取的是宿主机侧的 `.env`，请确保两边一致�
                   ↓
          内置执行器轮询（容器内 docker compose，经挂载的 docker.sock）
                   ↓
-         docker compose -f ... up -d
+         docker compose -f ... pull && up -d
                   ↓
          写 .results/{jobId}.json
                   ↓
@@ -242,10 +245,12 @@ watcher 执行，则读取的是宿主机侧的 `.env`，请确保两边一致�
 
 内置执行器的行为：
 
-- 只接受 `up` / `down` / `restart` / `pull`
+- 接受 `deploy` / `up` / `down` / `restart` / `pull`
+- `deploy` = `pull` + `up -d` 合成一次执行；
+  pull 阶段带 `--ignore-pull-failures`，失败不阻断启动，成败以 up 为准
 - 消费侧二次校验文件名与动作白名单，不信任投递内容
 - 超过 5 分钟的请求视为过期，直接写失败结果，不执行
-- 单条命令 10 分钟执行超时
+- 单条命令 10 分钟执行超时（`deploy` 的 pull 与 up 各自独立计时）
 - 结果只保留最近 50 条
 - `up` 时附带 `--remove-orphans`
 

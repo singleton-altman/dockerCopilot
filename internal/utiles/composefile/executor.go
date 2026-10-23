@@ -46,6 +46,8 @@ const (
 	ActionDown    Action = "down"    // docker compose down
 	ActionRestart Action = "restart" // docker compose restart
 	ActionPull    Action = "pull"    // docker compose pull
+	// ActionDeploy 拉取镜像后启动，一次任务完成「更新并生效」
+	ActionDeploy Action = "deploy"
 )
 
 var validActions = map[Action]bool{
@@ -53,6 +55,7 @@ var validActions = map[Action]bool{
 	ActionDown:    true,
 	ActionRestart: true,
 	ActionPull:    true,
+	ActionDeploy:  true,
 }
 
 // Job 投递给宿主机 watcher 的执行请求
@@ -61,6 +64,9 @@ type Job struct {
 	Filename  string    `json:"filename"`
 	Action    Action    `json:"action"`
 	CreatedAt time.Time `json:"createdAt"`
+	// ignorePullFailures 仅进程内使用，不参与序列化：
+	// deploy 复合动作里的 pull 允许个别镜像失败，避免 build-only 服务拖垮整次部署。
+	ignorePullFailures bool
 }
 
 // JobResult watcher 回写的结果
@@ -342,7 +348,7 @@ func (e *Executor) claimAndRun(ctx context.Context, id string) {
 
 	runner := e.runner
 	if runner == nil {
-		runner = e.runCompose
+		runner = e.runJob
 	}
 	logx.Infof("开始执行 compose 任务: %s %s (job %s)", job.Action, job.Filename, job.ID)
 	result := runner(ctx, job)
@@ -377,6 +383,9 @@ func (e *Executor) runCompose(ctx context.Context, job Job) JobResult {
 		args = append(args, "restart")
 	case ActionPull:
 		args = append(args, "pull")
+		if job.ignorePullFailures {
+			args = append(args, "--ignore-pull-failures")
+		}
 	}
 
 	cmd := exec.CommandContext(execCtx, e.composeCmd[0], args...)
@@ -392,6 +401,35 @@ func (e *Executor) runCompose(ctx context.Context, job Job) JobResult {
 		logx.Infof("compose 任务完成: %s %s (job %s)", job.Action, job.Filename, job.ID)
 	} else {
 		logx.Errorf("compose 任务失败: %s %s (job %s)", job.Action, job.Filename, job.ID)
+	}
+	return result
+}
+
+// runJob 执行一个任务。deploy 是复合动作：先拉取镜像再启动，
+// 让「更新镜像并生效」在界面上是一次操作，而不是先点拉取再点启动。
+func (e *Executor) runJob(ctx context.Context, job Job) JobResult {
+	if job.Action != ActionDeploy {
+		return e.runCompose(ctx, job)
+	}
+
+	pullJob := job
+	pullJob.Action = ActionPull
+	pullJob.ignorePullFailures = true
+	pullResult := e.runCompose(ctx, pullJob)
+
+	upJob := job
+	upJob.Action = ActionUp
+	upResult := e.runCompose(ctx, upJob)
+
+	result := JobResult{
+		Output:     "== pull ==\n" + pullResult.Output + "\n\n== up ==\n" + upResult.Output,
+		Success:    upResult.Success,
+		FinishedAt: time.Now(),
+	}
+	if !pullResult.Success {
+		// 拉取失败不阻断启动：只有 build 没有 image 的服务 pull 必然报错，
+		// 此时用本地已有镜像启动仍然是有意义的，最终成败以启动为准。
+		result.Output += "\n提示: 拉取阶段未完全成功，已使用本地已有镜像启动"
 	}
 	return result
 }
