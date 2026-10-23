@@ -69,13 +69,23 @@ type Job struct {
 	ignorePullFailures bool
 }
 
+// JobStep 执行过程中的一个阶段，用于向用户说明「实际发生了什么」。
+// Status 取值：success / warning / failed / skipped。
+type JobStep struct {
+	Stage   string `json:"stage"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
 // JobResult watcher 回写的结果
 type JobResult struct {
-	ID         string    `json:"id"`
-	Filename   string    `json:"filename"`
-	Action     Action    `json:"action"`
-	Success    bool      `json:"success"`
-	Output     string    `json:"output"`
+	ID       string `json:"id"`
+	Filename string `json:"filename"`
+	Action   Action `json:"action"`
+	Success  bool   `json:"success"`
+	Output   string `json:"output"`
+	// Steps 结构化的过程记录，便于界面按阶段展示；为空时客户端回退到 Output
+	Steps      []JobStep `json:"steps,omitempty"`
 	FinishedAt time.Time `json:"finishedAt"`
 }
 
@@ -358,6 +368,11 @@ func (e *Executor) claimAndRun(ctx context.Context, id string) {
 	if result.FinishedAt.IsZero() {
 		result.FinishedAt = time.Now()
 	}
+	// 单动作任务（up/down/restart/pull）在这里补过程结论；
+	// deploy 由 runJob 自己生成 pull/up 两段，避免重复覆盖。
+	if len(result.Steps) == 0 {
+		result.Steps = summarizeSingle(job.Action, result.Output, result.Success)
+	}
 	if len(result.Output) > e.maxOutput {
 		result.Output = result.Output[:e.maxOutput] + "\n...(已截断)"
 	}
@@ -426,12 +441,52 @@ func (e *Executor) runJob(ctx context.Context, job Job) JobResult {
 		Success:    upResult.Success,
 		FinishedAt: time.Now(),
 	}
+	// 用 pull 的输出判断「到底有没有拉到新镜像」，而不是看退出码：
+	// --ignore-pull-failures 让 pull 恒返回 0，退出码反映不了真实结果。
+	pullStep, outcomes := summarizePull(pullResult.Output)
+	// 命令本身失败（--ignore-pull-failures 吞不掉的情形）必须标成 failed
 	if !pullResult.Success {
-		// 拉取失败不阻断启动：只有 build 没有 image 的服务 pull 必然报错，
-		// 此时用本地已有镜像启动仍然是有意义的，最终成败以启动为准。
-		result.Output += "\n提示: 拉取阶段未完全成功，已使用本地已有镜像启动"
+		pullStep.Status = "failed"
+	}
+	upStep := summarizeUp(upResult.Output)
+	if !upResult.Success {
+		upStep.Status = "failed"
+	}
+	result.Steps = []JobStep{pullStep, upStep}
+
+	if pullStep.Status != "success" {
+		// deploy 里 pull 失败不阻断启动，这里补上后续行为，让用户知道发生了什么
+		result.Steps[0].Message += "；已改用本地已有镜像启动"
+		result.Output += "\n提示: " + result.Steps[0].Message
+	}
+	// 拉取全部失败且容器没有任何变化时，明确告诉用户「其实没更新」
+	if upStep.Status == "success" && isAllUnchanged(upStep.Message) && !allPulled(outcomes) {
+		result.Steps = append(result.Steps, JobStep{
+			Stage:   "result",
+			Status:  "warning",
+			Message: "容器未重建，仍在运行原有镜像；如需强制更新请确认镜像 tag 已变更或选择拉取最新",
+		})
 	}
 	return result
+}
+
+// isAllUnchanged 判断 up 摘要是否只有「无变化」的容器。
+func isAllUnchanged(message string) bool {
+	return strings.Contains(message, "无变化") && !strings.Contains(message, "已重建") &&
+		!strings.Contains(message, "已创建") && !strings.Contains(message, "已启动")
+}
+
+// allPulled 判断所有镜像是否都成功拉取。
+func allPulled(outcomes []imagePullOutcome) bool {
+	if len(outcomes) == 0 {
+		return false
+	}
+	for _, item := range outcomes {
+		if item.Status != "pulled" {
+			return false
+		}
+	}
+	return true
 }
 
 // writeResult 落盘结果并清理过期记录。

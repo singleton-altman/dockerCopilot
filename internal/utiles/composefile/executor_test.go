@@ -331,8 +331,59 @@ func TestDeployKeepsRunningWhenPullFails(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("up succeeded, deploy should succeed: %s", result.Output)
 	}
-	if !strings.Contains(result.Output, "拉取阶段未完全成功") {
-		t.Fatalf("expected pull warning, got: %s", result.Output)
+	if len(result.Steps) == 0 || result.Steps[0].Stage != "pull" {
+		t.Fatalf("expected pull step, got %+v", result.Steps)
+	}
+	if result.Steps[0].Status != "failed" {
+		t.Fatalf("pull failed at command level, step should be failed: %+v", result.Steps[0])
+	}
+	if !strings.Contains(result.Output, "提示:") {
+		t.Fatalf("expected pull warning in output, got: %s", result.Output)
+	}
+}
+
+func TestDeployReportsPullFallbackFromOutput(t *testing.T) {
+	ex := newExecutor(t)
+	// 模拟真实 compose 输出：一个镜像拉取成功，另一个只有本地构建版
+	bin := filepath.Join(t.TempDir(), "docker")
+	script := `#!/bin/sh
+case "$*" in
+  *pull*)
+    echo " Image web:1 Pulling "
+    echo " Image web:1 Pulled "
+    echo " Image local:2 Pulling "
+    echo " Image local:2 Error pull access denied for local, repository does not exist"
+    echo " Container web Recreated "
+    exit 0
+    ;;
+  *up*)
+    echo " Container web Started "
+    echo " Container db Running "
+    exit 0
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ex.composeCmd = []string{bin, "compose"}
+
+	result := ex.runJob(context.Background(), Job{ID: "1", Filename: "web.yaml", Action: ActionDeploy})
+	if !result.Success {
+		t.Fatalf("deploy should succeed: %s", result.Output)
+	}
+	if len(result.Steps) < 2 {
+		t.Fatalf("expected pull and up steps, got %+v", result.Steps)
+	}
+	if result.Steps[0].Status != "warning" || !strings.Contains(result.Steps[0].Message, "本地已有镜像") {
+		t.Errorf("pull step should warn about fallback: %+v", result.Steps[0])
+	}
+	if result.Steps[1].Status != "success" {
+		t.Errorf("up step should succeed: %+v", result.Steps[1])
+	}
+	if !strings.Contains(result.Steps[1].Message, "已启动") || !strings.Contains(result.Steps[1].Message, "无变化") {
+		t.Errorf("up step should describe both containers: %s", result.Steps[1].Message)
 	}
 }
 
