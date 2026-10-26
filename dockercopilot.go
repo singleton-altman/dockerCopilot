@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/types"
@@ -11,16 +12,19 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/onlyLTY/dockerCopilot/internal/config"
 	"github.com/onlyLTY/dockerCopilot/internal/handler"
 	"github.com/onlyLTY/dockerCopilot/internal/svc"
 	"github.com/onlyLTY/dockerCopilot/internal/utiles"
+	"github.com/onlyLTY/dockerCopilot/internal/utiles/logoshare"
 	"github.com/robfig/cron/v3"
 	"github.com/zeromicro/go-zero/core/conf"
 	"github.com/zeromicro/go-zero/core/logx"
 	"github.com/zeromicro/go-zero/rest"
 	"github.com/zeromicro/go-zero/rest/httpx"
+	"github.com/zeromicro/go-zero/rest/pathvar"
 	"github.com/zeromicro/x/errors"
 	xhttp "github.com/zeromicro/x/http"
 )
@@ -134,7 +138,24 @@ export const customImageLogos = {
 		}
 	})
 	handler.RegisterHandlers(server, ctx)
-	RegisterHandlers(server)
+	// 跨端共享 logo 配置：运行时从可配置 URL 拉取增量包并与内置包合并下发；
+	// 拉取失败回退内置包，未配置 LOGO_SHARE_URL 时功能关闭。
+	logoShare := logoshare.New(os.Getenv("LOGO_SHARE_URL"))
+	if logoShare.Enabled() {
+		go func() {
+			if err := logoShare.Refresh(context.Background()); err != nil {
+				logx.Errorf("logo share 拉取失败: %v", err)
+			}
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				if err := logoShare.Refresh(context.Background()); err != nil {
+					logx.Errorf("logo share 拉取失败: %v", err)
+				}
+			}
+		}()
+	}
+	RegisterHandlers(server, logoShare)
 	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
 	logx.Info("程序版本" + config.Version)
 	server.Start()
@@ -152,7 +173,7 @@ func serveFrontIndex(w http.ResponseWriter, r *http.Request, frontFS fs.FS) {
 	_, _ = w.Write(index)
 }
 
-func RegisterHandlers(engine *rest.Server) {
+func RegisterHandlers(engine *rest.Server, logoShare *logoshare.Service) {
 	frontFS, err := fs.Sub(embeddedFront, "front")
 	if err != nil {
 		log.Fatal(err)
@@ -181,7 +202,45 @@ func RegisterHandlers(engine *rest.Server) {
 			{
 				Method: http.MethodGet,
 				Path:   "/manager",
+				// 入口页禁缓存：升级后浏览器不得停留在旧版 UI（带 hash 的资源名可长期缓存）
 				Handler: func(w http.ResponseWriter, r *http.Request) {
+					serveFrontIndex(w, r, frontFS)
+				},
+			},
+			{
+				Method: http.MethodGet,
+				Path:   "/manager/share-logos.json",
+				// 合并视图：内置包 + 远程增量包（LOGO_SHARE_URL 拉取）。
+				Handler: func(w http.ResponseWriter, r *http.Request) {
+					embedBytes, err := fs.ReadFile(frontFS, "share-logos.json")
+					if err != nil {
+						http.Error(w, "share pack unavailable", http.StatusNotFound)
+						return
+					}
+					var embed logoshare.Pack
+					_ = json.Unmarshal(embedBytes, &embed)
+					mappings, mono, version := logoShare.Merged(embed.Mappings, embed.Mono, logoShare.IconBase())
+					w.Header().Set("Content-Type", "application/json; charset=utf-8")
+					w.Header().Set("Cache-Control", "no-cache")
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"version":  version,
+						"mappings": mappings,
+						"mono":     mono,
+					})
+				},
+			},
+			{
+				Method: http.MethodGet,
+				Path:   "/manager/share-icon/:file",
+				// 远程增量包的图标直接 302 到远程源（如 CDN）；内置包走本地文件。
+				Handler: func(w http.ResponseWriter, r *http.Request) {
+					if logoShare.IconBase() != "" {
+						file := pathvar.Vars(r)["file"]
+						if file != "" && !strings.Contains(file, "/") && strings.Contains(file, ".") {
+							http.Redirect(w, r, logoShare.IconBase()+logoshare.IconPrefix+file, http.StatusFound)
+							return
+						}
+					}
 					frontFileServer.ServeHTTP(w, r)
 				},
 			},
