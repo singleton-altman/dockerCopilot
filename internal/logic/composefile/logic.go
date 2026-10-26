@@ -2,6 +2,8 @@ package composefile
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 
 	"github.com/onlyLTY/dockerCopilot/internal/svc"
 	"github.com/onlyLTY/dockerCopilot/internal/types"
@@ -115,20 +117,23 @@ func (l *Logic) Validate(req *types.ComposeFileReq) (resp *types.Resp, err error
 	return resp, nil
 }
 
-// Deploy 投递执行请求。
-// 服务端不会自行执行 compose，由宿主机侧 watcher 消费队列。
+// Deploy 投递执行请求，由内置执行器或宿主机 watcher 消费。
 func (l *Logic) Deploy(req *types.ComposeDeployReq) (resp *types.Resp, err error) {
 	resp = &types.Resp{}
 
-	// 投递前确认文件存在且结构合法，避免让 watcher 执行一份坏配置
-	if _, err := l.svcCtx.ComposeStore.Read(req.Filename); err != nil {
+	// 投递前读取文件：确认存在且可读，并据此计算配置指纹。
+	// 文件不存在/不可读直接报业务错误，不再产出注定失败的任务。
+	content, err := l.svcCtx.ComposeStore.Read(req.Filename)
+	if err != nil {
 		resp.Code = 400
 		resp.Msg = err.Error()
 		resp.Data = map[string]interface{}{}
 		return resp, nil
 	}
+	sum := sha256.Sum256([]byte(content))
 
-	id, err := l.svcCtx.ComposeExecutor.Submit(req.Filename, composefile.Action(req.Action))
+	id, err := l.svcCtx.ComposeExecutor.SubmitWithConfig(req.Filename, composefile.Action(req.Action),
+		hex.EncodeToString(sum[:]))
 	if err != nil {
 		resp.Code = 400
 		resp.Msg = err.Error()
@@ -140,13 +145,18 @@ func (l *Logic) Deploy(req *types.ComposeDeployReq) (resp *types.Resp, err error
 	resp.Code = 200
 	resp.Msg = "success"
 	resp.Data = map[string]interface{}{"jobID": id}
+	// Submission is already durable. A transient read error must never turn it
+	// into a reported failure that could encourage a duplicate POST.
+	if job, viewErr := l.svcCtx.ComposeExecutor.View(id); viewErr == nil && job != nil {
+		resp.Data.(map[string]interface{})["job"] = job
+	}
 	return resp, nil
 }
 
 // Result 查询执行结果
 func (l *Logic) Result(req *types.ComposeJobReq) (resp *types.Resp, err error) {
 	resp = &types.Resp{}
-	result, done, err := l.svcCtx.ComposeExecutor.Result(req.JobID)
+	job, err := l.svcCtx.ComposeExecutor.View(req.JobID)
 	if err != nil {
 		resp.Code = 400
 		resp.Msg = err.Error()
@@ -155,10 +165,18 @@ func (l *Logic) Result(req *types.ComposeJobReq) (resp *types.Resp, err error) {
 	}
 	resp.Code = 200
 	resp.Msg = "success"
-	resp.Data = map[string]interface{}{
-		"done":   done,
-		"result": result,
+	data := map[string]interface{}{
+		"done":   false,
+		"result": composefile.JobResult{},
+		"status": composefile.StatusNotFound,
 	}
+	if job != nil {
+		data["job"], data["status"] = job, job.Status
+		if job.Result != nil {
+			data["done"], data["result"] = true, *job.Result
+		}
+	}
+	resp.Data = data
 	return resp, nil
 }
 
@@ -172,9 +190,14 @@ func (l *Logic) History() (resp *types.Resp, err error) {
 		resp.Data = map[string]interface{}{}
 		return resp, nil
 	}
+	jobs, err := l.svcCtx.ComposeExecutor.Jobs(20)
+	if err != nil {
+		resp.Code, resp.Msg, resp.Data = 500, err.Error(), map[string]interface{}{}
+		return resp, nil
+	}
 	resp.Code = 200
 	resp.Msg = "success"
-	resp.Data = map[string]interface{}{"results": results}
+	resp.Data = map[string]interface{}{"results": results, "jobs": jobs}
 	return resp, nil
 }
 

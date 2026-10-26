@@ -157,6 +157,60 @@ GET  /api/compose/history
 执行采用**投递式**设计：请求先写入队列，再由内置执行器（或宿主机侧 watcher）
 消费执行，详见下方「Compose 执行」。
 
+#### 执行状态与兼容响应
+
+`JobView` 字段为 `id`、`filename`、`action`、`status`、`createdAt`，以及可选的
+`startedAt`、`updatedAt`、`result`、`configSha256`。时间均为 RFC3339 字符串。
+`status` 为 `queued` / `running` / `succeeded` / `failed` / `interrupted`。
+`interrupted` 表示**结果不确定，需核验实际容器/镜像状态**，不是确认业务失败，不能自动重试变更。
+
+投递时服务端读取 compose 文件内容并计算 SHA-256 指纹（hex 小写），随任务记录透出，
+便于核对「实际部署的是哪一份内容」；文件不存在或不可读直接返回业务错误（`code!=200`），
+不会生成注定失败的任务。
+
+投递响应保持 `data.jobID`，新增可选的 `data.job`（投递已持久化后，附加读取失败不会把投递改报失败）：
+
+```json
+{"code":200,"msg":"success","data":{"jobID":"example-web","job":{"id":"example-web","filename":"web.yaml","action":"deploy","status":"queued","createdAt":"2026-10-25T12:00:00Z","configSha256":"<sha256 hex>"}}}
+```
+
+查询保持 `data.done` / `data.result`，新增 `data.status` 和已知任务的 `data.job`。
+终态 `done:true` 且 `job.result` 与旧 `data.result` 一致；活动态 `done:false`，
+旧 `data.result` 保留零值对象，但 `job.result` 省略。`status` 与 `job.status` 一致。
+
+```json
+{"code":200,"msg":"success","data":{"done":true,"status":"interrupted","result":{"id":"example-web","filename":"web.yaml","action":"deploy","success":false,"output":"服务端执行进程已中断，执行结果不确定；请核验实际容器和镜像状态，勿自动重试","finishedAt":"2026-10-25T12:05:00Z","status":"interrupted","createdAt":"2026-10-25T12:00:00Z","startedAt":"2026-10-25T12:00:01Z"},"job":{"id":"example-web","filename":"web.yaml","action":"deploy","status":"interrupted","createdAt":"2026-10-25T12:00:00Z","startedAt":"2026-10-25T12:00:01Z","updatedAt":"2026-10-25T12:05:00Z","result":{"id":"example-web","filename":"web.yaml","action":"deploy","success":false,"output":"服务端执行进程已中断，执行结果不确定；请核验实际容器和镜像状态，勿自动重试","finishedAt":"2026-10-25T12:05:00Z","status":"interrupted","createdAt":"2026-10-25T12:00:00Z","startedAt":"2026-10-25T12:00:01Z"}}}}
+```
+
+未知 ID 不伪造成功：`data.job` 省略，`status:not_found`，`done:false`。
+
+终态 `result` 还可包含两个可选字段（旧 watcher / 旧任务数据缺省，缺省即视为「服务端未提供」）：
+
+- `configSha256`：投递时文件内容的 SHA-256，与 `job.configSha256` 对应；
+- `services`：`up`/`deploy`/`restart` 成功后按 compose 文件采集的服务运行状态
+  `[{name,state,health}]`（`health` 仅容器配置了 healthcheck 时非空，如 `healthy/unhealthy/starting`；
+  `down`/`pull` 不产出）。采集只读且失败降级：枚举失败或未注入 Docker 客户端时只追加
+  一条 `stage=ps` 的 `warning` 步骤（全部 running 视为 `success`，存在 `exited` 或
+  `unhealthy` 亦为 `warning`），不会推翻已成功的 up 结论。
+
+```json
+{"code":200,"msg":"success","data":{"done":true,"status":"succeeded","result":{"id":"example-web","filename":"web.yaml","action":"deploy","success":true,"output":"...","finishedAt":"2026-10-25T12:05:00Z","status":"succeeded","configSha256":"<sha256 hex>","services":[{"name":"web","state":"running","health":"healthy"},{"name":"db","state":"running"}]},"job":{"id":"example-web","filename":"web.yaml","action":"deploy","status":"succeeded","createdAt":"2026-10-25T12:00:00Z","configSha256":"<sha256 hex>"}}}
+```
+
+```json
+{"code":200,"msg":"success","data":{"done":false,"status":"not_found","result":{"id":"","filename":"","action":"","success":false,"output":"","finishedAt":"0001-01-01T00:00:00Z"}}}
+```
+
+历史保持 `data.results` 为最近 20 条已结束结果，新增 `data.jobs` 为**全部活动任务 + 最近 20 条终态**，
+合并后按 `updatedAt`（缺省用 `createdAt`）倒序，活动任务不受终态上限挤出。
+空列表为 `[]`。例如 `{"code":200,"msg":"success","data":{"results":[],"jobs":[]}}`。
+旧 watcher 无新增字段的结果仍按 `success` 推导成功/失败，时间优先使用仍存在的任务记录，
+无创建时间时回退 `finishedAt`；未知来源 claim 仅显示 `running`，不猜测执行结果。
+
+业务错误沿用响应 JSON 的 `code`（如提交/查询错误 `400`、历史读取错误 `500`）和 `msg`；
+这些接口仍沿用 HTTP 200 包裹业务响应，调用端必须检查 `code`。
+一次查询失败不改变任务生命周期。
+
 ### 发布监控
 
 ```
@@ -184,8 +238,9 @@ compose 文件存放在 `COMPOSE_DIR`（默认 `/data/stacks`），目录结构�
 ├── .backups/                # 保存前自动备份，每文件最多保留 20 份
 ├── .trash/                  # 软删除的文件，可恢复
 ├── .history.jsonl           # 版本历史，最多 200 条
-├── .queue/                  # 待执行请求（服务端写入）
-└── .results/                # 执行结果（内置执行器或 watcher 写入）
+├── .queue/                  # 待执行请求及已认领的 .json.claim
+├── .jobs/                   # 内置执行器 owner、跨进程锁及 running 生命周期
+└── .results/                # 最终执行结果（内置执行器或 watcher 写入）
 ```
 
 - 覆盖保存前会先备份旧内容，**备份失败则取消保存**
@@ -247,12 +302,28 @@ watcher 执行，则读取的是宿主机侧的 `.env`，请确保两边一致�
 
 - 接受 `deploy` / `up` / `down` / `restart` / `pull`
 - `deploy` = `pull` + `up -d` 合成一次执行；
-  pull 阶段带 `--ignore-pull-failures`，失败不阻断启动，成败以 up 为准
-- 消费侧二次校验文件名与动作白名单，不信任投递内容
+  pull 阶段带 `--ignore-pull-failures`，普通拉取失败不阻断启动，成败以 up 为准；
+  但取消/超时中断不能跨过阶段边界继续启动，进入变更阶段后的中断不承诺回滚
+- 提交与消费侧均校验单层 YAML 文件名与动作白名单；不能投递 `.env`
 - 超过 5 分钟的请求视为过期，直接写失败结果，不执行
-- 单条命令 10 分钟执行超时（`deploy` 的 pull 与 up 各自独立计时）
-- 结果只保留最近 50 条
-- `up` 时附带 `--remove-orphans`
+- 单条命令 10 分钟执行超时（`deploy` 的 pull 与 up 各自独立计时），中断/超时结果不确定
+- 内置执行器结果保留最近 50 条，清理对应生命周期；活动任务不裁剪
+- 不更改默认项目名，不使用 `--remove-orphans`；保留已有按文件归属识别的精确孤儿清理
+- 请求、owner、生命周期和结果采用临时文件、同步、原子 rename；**最终结果成功落盘后才删除 claim**，
+  写失败保留 claim 与生命周期，不能为重试写盘而再次执行变更
+- 启动时取得 `.jobs/.executor.lock` 跨进程独占锁后，只做一次恢复：使用持久 instance + 进程 owner 标记，
+  将明确属于本内置执行器旧进程的 running/claim 转为 `interrupted`，`result.success=false` 且提示结果不确定、需核验；
+  已落盘最终结果优先，绝不自动重放。旧版无 owner 或外部来源不明 claim 不改动、不误判中断
+- 该锁要求本地文件系统支持 `flock` 与目录同步；不保证 NFS/分布式存储上的多实例队列语义。
+  owner/生命周期/内置结果为 `0600`；投递队列保持旧 `0644` 可读权限。
+  外部 watcher 仍需对队列/结果目录具备原有读写权限
+
+**剩余边界**：本批未加入幂等键、配置快照或自动重试。收到投递响应前若断网，任务可能已入队，
+客户端不得自动重提 POST，应先查历史并核验。配置与 `.env` 在排队期间可能变化，任务执行当前文件，
+不保证提交时快照。claim 认领后、owner 落盘前崩溃会留下来源不明 claim，保守保留供人工核验；
+外部 watcher 不回写结果时可能持续显示 running。结果写盘失败期间也可能保持 running，
+重启恢复后才确定为 interrupted；这不能当作确认业务失败或自动重试依据。
+内置执行器关闭时不运行恢复；重新启用后才处理明确 owner 记录。
 
 **外部 watcher（可选）**：宿主机侧 watcher 仍可消费同一队列，与内置执行器
 靠文件原子认领共存，谁先认领谁执行，不会重复执行。设置

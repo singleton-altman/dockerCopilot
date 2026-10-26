@@ -2,6 +2,8 @@ package composefile
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,8 +40,7 @@ const (
 	queuePollInterval = time.Second
 )
 
-// Action 允许的编排动作。
-// 服务端不会自己执行，只负责投递请求。
+// Action 允许的编排动作，由内置执行器或外部 watcher 消费。
 type Action string
 
 const (
@@ -65,6 +66,10 @@ type Job struct {
 	Filename  string    `json:"filename"`
 	Action    Action    `json:"action"`
 	CreatedAt time.Time `json:"createdAt"`
+	Owner     *jobOwner `json:"owner,omitempty"`
+	// ConfigSha256 投递时文件内容的 SHA-256（hex 小写），旧 watcher/旧队列文件可缺省。
+	// 用于在任务详情里核对「部署的是哪一份内容」：部署后再改动文件即可被发现。
+	ConfigSha256 string `json:"configSha256,omitempty"`
 	// ignorePullFailures 仅进程内使用，不参与序列化：
 	// deploy 复合动作里的 pull 允许个别镜像失败，避免 build-only 服务拖垮整次部署。
 	ignorePullFailures bool
@@ -88,6 +93,15 @@ type JobResult struct {
 	// Steps 结构化的过程记录，便于界面按阶段展示；为空时客户端回退到 Output
 	Steps      []JobStep `json:"steps,omitempty"`
 	FinishedAt time.Time `json:"finishedAt"`
+	// Status is optional for legacy watchers; interrupted means outcome is unknown.
+	Status JobStatus `json:"status,omitempty"`
+	// ConfigSha256 与投递请求（Job）里同名字段对应，便于核对部署时用的配置内容。
+	ConfigSha256 string `json:"configSha256,omitempty"`
+	// Services up/deploy/restart 成功后按 compose 文件采集到的服务运行状态；
+	// down/pull 及采集失败时缺省，旧 watcher 不会产出。
+	CreatedAt *time.Time     `json:"createdAt,omitempty"`
+	StartedAt *time.Time     `json:"startedAt,omitempty"`
+	Services  []ServiceState `json:"services,omitempty"`
 }
 
 // Executor 负责投递请求与读取结果。
@@ -107,6 +121,14 @@ type Executor struct {
 	runner func(ctx context.Context, job Job) JobResult
 	// docker 用于精确识别容器归属；为 nil 时跳过孤儿清理（宁可留孤儿也不误删）。
 	docker *client.Client
+	// dockerAPI 服务状态采集用的只读视图；仅测试注入假实现用，为 nil 时回落到 docker。
+	dockerAPI   containerSource
+	startupOnce sync.Once
+	startOnce   sync.Once
+	runMu       sync.Mutex
+	startupErr  error
+	owner       jobOwner
+	ownerLock   *os.File
 }
 
 func NewExecutor(workDir string) *Executor {
@@ -135,6 +157,16 @@ func (e *Executor) ensureDirs() error {
 
 // Submit 投递一个执行请求，返回请求 ID。
 func (e *Executor) Submit(filename string, action Action) (string, error) {
+	return e.SubmitWithConfig(filename, action, "")
+}
+
+// SubmitWithConfig 投递执行请求并记录配置指纹。
+// configSha256 是投递时 compose 文件内容的 SHA-256（hex 小写），随队列 JSON 持久化，
+// 供任务详情核对「实际部署的是哪一份内容」。
+func (e *Executor) SubmitWithConfig(filename string, action Action, configSha256 string) (string, error) {
+	if !isExecutableFilename(filename) {
+		return "", errors.New("仅支持执行单层 .yml 或 .yaml 文件")
+	}
 	if !validActions[action] {
 		return "", fmt.Errorf("不支持的执行动作: %s", action)
 	}
@@ -157,23 +189,15 @@ func (e *Executor) Submit(filename string, action Action) (string, error) {
 
 	id := fmt.Sprintf("%d-%s", time.Now().UnixNano(), sanitizeID(filename))
 	job := Job{
-		ID:        id,
-		Filename:  filename,
-		Action:    action,
-		CreatedAt: time.Now(),
+		ID:           id,
+		Filename:     filename,
+		Action:       action,
+		CreatedAt:    time.Now(),
+		ConfigSha256: configSha256,
 	}
-	content, err := json.MarshalIndent(job, "", "  ")
-	if err != nil {
-		return "", err
-	}
-
-	// 先写临时文件再 rename，watcher 不会读到半截请求
+	// Publish the request only after its complete JSON has been synced.
 	path := filepath.Join(e.queueDir, id+".json")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, content, 0o644); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := atomicJSONMode(path, job, 0o644); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -254,7 +278,7 @@ func (e *Executor) pendingCountLocked() (int, error) {
 	}
 	count := 0
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+		if !entry.IsDir() && (strings.HasSuffix(entry.Name(), ".json") || strings.HasSuffix(entry.Name(), ".json"+claimSuffix)) {
 			count++
 		}
 	}
@@ -266,24 +290,30 @@ func (e *Executor) pendingCountLocked() (int, error) {
 // 因此普通安装不再需要宿主机侧的 watcher。CLI 不可用（如本地开发环境）时只记录日志并返回，
 // 不消费队列，任务留给外部 watcher 处理。
 func (e *Executor) Start(ctx context.Context) {
-	e.composeCmd = detectCompose()
-	if e.composeCmd == nil {
-		logx.Info("容器内 docker compose 不可用，执行请求将等待宿主机 watcher 处理")
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(queuePollInterval)
-		defer ticker.Stop()
-		for {
-			e.drainOnce(ctx)
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
+	e.startOnce.Do(func() {
+		if err := e.startup(); err != nil {
+			logx.Errorf("内置 compose 执行器恢复失败，未启动: %v", err)
+			return
 		}
-	}()
-	logx.Infof("内置 compose 执行器已启动: %s", strings.Join(e.composeCmd, " "))
+		e.composeCmd = detectCompose()
+		if e.composeCmd == nil {
+			logx.Info("容器内 docker compose 不可用，执行请求将等待宿主机 watcher 处理")
+			return
+		}
+		go func() {
+			ticker := time.NewTicker(queuePollInterval)
+			defer ticker.Stop()
+			for {
+				e.drainOnce(ctx)
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+		logx.Infof("内置 compose 执行器已启动: %s", strings.Join(e.composeCmd, " "))
+	})
 }
 
 // composeCandidates 依次探测的 compose 调用方式。
@@ -321,6 +351,9 @@ func (e *Executor) drainOnce(ctx context.Context) {
 		return
 	}
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
@@ -335,64 +368,124 @@ func (e *Executor) drainOnce(ctx context.Context) {
 // claimAndRun 原子认领一个任务并执行。
 // rename 是原子的：内置执行器与外部 watcher 谁先改名为 .claim 谁执行，不会重复执行。
 func (e *Executor) claimAndRun(ctx context.Context, id string) {
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
+	if ctx.Err() != nil || !isSafeID(id) {
+		return
+	}
+	if err := e.startup(); err != nil {
+		logx.Errorf("内置执行器恢复失败: %v", err)
+		return
+	}
 	queuePath := filepath.Join(e.queueDir, id+".json")
 	claimPath := queuePath + claimSuffix
+	// Never overwrite an existing claim (including an external watcher's).
+	if _, err := os.Lstat(claimPath); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
 	if err := os.Rename(queuePath, claimPath); err != nil {
-		// 已被其他消费者取走
 		return
 	}
-	content, err := os.ReadFile(claimPath)
-	if err != nil {
-		return
-	}
-	defer os.Remove(claimPath)
-
 	var job Job
-	if err := json.Unmarshal(content, &job); err != nil {
-		e.writeResult(JobResult{ID: id, Success: false,
-			Output: "任务文件损坏: " + err.Error(), FinishedAt: time.Now()})
+	if err := readJSON(claimPath, &job); err != nil {
+		e.finishClaim(claimPath, JobResult{ID: id, Success: false, Status: StatusFailed,
+			Output: "任务文件损坏，未执行", FinishedAt: time.Now()})
 		return
 	}
-	// 消费侧二次校验，不信任投递阶段写入的任何内容
+	job.ID = id
+	job.Owner = &e.owner
+	// Mark ownership before any Docker invocation. If this fails, retain claim
+	// without executing; an unmarked claim is never guessed to be ours.
+	if err := atomicJSON(claimPath, job); err != nil {
+		logx.Errorf("持久化任务归属失败，未执行: %v", err)
+		return
+	}
+	started := time.Now()
+	record := lifecycleRecord{JobView: viewFromJob(job, StatusRunning), Owner: e.owner}
+	record.StartedAt, record.UpdatedAt = &started, &started
+	if err := atomicJSON(e.lifecyclePath(id), record); err != nil {
+		logx.Errorf("持久化任务状态失败，未执行: %v", err)
+		return
+	}
+	finish := func(result JobResult) {
+		result.ID, result.Filename, result.Action = id, job.Filename, job.Action
+		result.CreatedAt, result.StartedAt = &job.CreatedAt, &started
+		result.ConfigSha256 = job.ConfigSha256
+		if result.FinishedAt.IsZero() {
+			result.FinishedAt = time.Now()
+		}
+		result.Status = resultStatus(result)
+		e.finishClaim(claimPath, result)
+	}
 	if !validActions[job.Action] || !isExecutableFilename(job.Filename) {
-		e.writeResult(JobResult{ID: id, Filename: job.Filename, Action: job.Action, Success: false,
-			Output:     fmt.Sprintf("非法执行请求: action=%s filename=%s", job.Action, job.Filename),
-			FinishedAt: time.Now()})
+		finish(JobResult{Output: "非法执行请求，未执行"})
 		return
 	}
 	if time.Since(job.CreatedAt) > jobMaxAge {
-		e.writeResult(JobResult{ID: id, Filename: job.Filename, Action: job.Action, Success: false,
-			Output: "任务已过期，未执行", FinishedAt: time.Now()})
+		finish(JobResult{Output: "任务已过期，未执行"})
 		return
 	}
-
+	if ctx.Err() != nil {
+		finish(interruptedResult("任务被中断；结果不确定，请核验实际状态，勿自动重试"))
+		return
+	}
+	// 投递与执行之间文件可能再次被修改（队列最长可等 jobMaxAge）。
+	// 指纹对应投递时内容，执行用的是当前文件；发现漂移在结果里明示，避免核对指纹时误导。
+	driftDetected := false
+	if job.ConfigSha256 != "" {
+		if content, err := os.ReadFile(filepath.Join(e.workDir, job.Filename)); err == nil {
+			sum := sha256.Sum256(content)
+			driftDetected = hex.EncodeToString(sum[:]) != job.ConfigSha256
+		}
+	}
 	runner := e.runner
 	if runner == nil {
 		runner = e.runJob
 	}
 	logx.Infof("开始执行 compose 任务: %s %s (job %s)", job.Action, job.Filename, job.ID)
 	result := runner(ctx, job)
-	result.ID = id
-	result.Filename = job.Filename
-	result.Action = job.Action
-	if result.FinishedAt.IsZero() {
-		result.FinishedAt = time.Now()
+	if ctx.Err() != nil {
+		result.Success, result.Status = false, StatusInterrupted
+		result.Output += "\n执行被中断，结果不确定；请核验实际容器和镜像状态，勿自动重试"
+		// 与 services.go 的口径一致：中断=结果不确定，不保留服务快照与 ps 结论。
+		result.Services = nil
+		kept := result.Steps[:0]
+		for _, step := range result.Steps {
+			if step.Stage != "ps" {
+				kept = append(kept, step)
+			}
+		}
+		result.Steps = kept
 	}
-	// 单动作任务（up/down/restart/pull）在这里补过程结论；
-	// deploy 由 runJob 自己生成 pull/up 两段，避免重复覆盖。
-	if len(result.Steps) == 0 {
+	if len(result.Steps) == 0 && result.Status != StatusInterrupted {
 		result.Steps = summarizeSingle(job.Action, result.Output, result.Success,
 			buildableImages(e.workDir, job.Filename))
+	}
+	if driftDetected && result.Status != StatusInterrupted {
+		result.Steps = append([]JobStep{{Stage: "fingerprint", Status: "warning",
+			Message: "文件在投递后、执行前被修改：任务指纹对应投递时内容，本次实际执行的是当前文件内容"}}, result.Steps...)
 	}
 	if len(result.Output) > e.maxOutput {
 		result.Output = result.Output[:e.maxOutput] + "\n...(已截断)"
 	}
-	e.writeResult(result)
+	finish(result)
+}
+
+func (e *Executor) finishClaim(claimPath string, result JobResult) {
+	if err := e.writeResult(result); err != nil {
+		logx.Errorf("写入执行结果失败，保留 claim 及生命周期供恢复: %v", err)
+		return
+	}
+	_ = os.Remove(claimPath)
+	_ = os.Remove(e.lifecyclePath(result.ID))
 }
 
 // runCompose 通过容器内的 docker CLI 执行 compose 命令，
 // daemon 是挂载进容器的宿主机 docker.sock，效果等同于在宿主机上执行。
 func (e *Executor) runCompose(ctx context.Context, job Job) JobResult {
+	if ctx.Err() != nil {
+		return interruptedResult("执行已中断，结果不确定；请核验实际状态")
+	}
 	execCtx, cancel := context.WithTimeout(ctx, composeExecTimeout)
 	defer cancel()
 
@@ -428,8 +521,9 @@ func (e *Executor) runCompose(ctx context.Context, job Job) JobResult {
 	if err != nil {
 		result.Output = fmt.Sprintf("%s\n执行失败: %v", result.Output, err)
 	}
-	if execCtx.Err() == context.DeadlineExceeded {
-		result.Output += "\n执行超时，已终止"
+	if execCtx.Err() != nil {
+		result.Success, result.Status = false, StatusInterrupted
+		result.Output += "\n执行中断或超时，结果不确定；请核验实际容器和镜像状态，勿自动重试"
 	}
 	if result.Success {
 		logx.Infof("compose 任务完成: %s %s (job %s)", job.Action, job.Filename, job.ID)
@@ -441,15 +535,31 @@ func (e *Executor) runCompose(ctx context.Context, job Job) JobResult {
 
 // runJob 执行一个任务。deploy 是复合动作：先拉取镜像再启动，
 // 让「更新镜像并生效」在界面上是一次操作，而不是先点拉取再点启动。
+// up/deploy/restart 成功后额外采集本文件容器的运行状态（stage=ps 的只读快照），
+// 采集只走只读接口且任何失败都降级为 warning，不会推翻已经得出的任务结论。
 func (e *Executor) runJob(ctx context.Context, job Job) JobResult {
 	if job.Action != ActionDeploy {
-		return e.runCompose(ctx, job)
+		result := e.runCompose(ctx, job)
+		if e.serviceSnapshotApplies(job, result) {
+			// 步骤口径与 claimAndRun 的兜底归纳保持一致，再在末尾补 ps 结论
+			result.Steps = summarizeSingle(job.Action, result.Output, result.Success,
+				buildableImages(e.workDir, job.Filename))
+			result = e.attachServiceSnapshot(ctx, job, result)
+		}
+		return result
 	}
 
 	pullJob := job
 	pullJob.Action = ActionPull
 	pullJob.ignorePullFailures = true
 	pullResult := e.runCompose(ctx, pullJob)
+	// Cancellation/timeout is not a pull failure that permits a mutating up.
+	if ctx.Err() != nil || pullResult.Status == StatusInterrupted {
+		pullResult.Success, pullResult.Status = false, StatusInterrupted
+		pullResult.Steps = []JobStep{{Stage: "pull", Status: "warning", Message: "拉取被中断，结果不确定"},
+			{Stage: "up", Status: "skipped", Message: "任务已中断，未开始启动阶段；请核验实际状态"}}
+		return pullResult
+	}
 
 	upJob := job
 	upJob.Action = ActionUp
@@ -458,6 +568,7 @@ func (e *Executor) runJob(ctx context.Context, job Job) JobResult {
 	result := JobResult{
 		Output:     "== pull ==\n" + pullResult.Output + "\n\n== up ==\n" + upResult.Output,
 		Success:    upResult.Success,
+		Status:     upResult.Status,
 		FinishedAt: time.Now(),
 	}
 	// 用 pull 的输出判断「到底有没有拉到新镜像」，而不是看退出码：
@@ -499,7 +610,7 @@ func (e *Executor) runJob(ctx context.Context, job Job) JobResult {
 			})
 		}
 	}
-	return result
+	return e.attachServiceSnapshot(ctx, job, result)
 }
 
 // realPullFailures 返回真正拉取失败的镜像，排除声明了 build 的本地构建镜像。
@@ -520,29 +631,15 @@ func isAllUnchanged(message string) bool {
 }
 
 // writeResult 落盘结果并清理过期记录。
-func (e *Executor) writeResult(result JobResult) {
+func (e *Executor) writeResult(result JobResult) error {
 	if !isSafeID(result.ID) {
-		return
+		return errors.New("非法请求 ID")
 	}
-	if err := os.MkdirAll(e.resultDir, 0o755); err != nil {
-		logx.Errorf("创建结果目录失败: %v", err)
-		return
-	}
-	content, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return
-	}
-	path := filepath.Join(e.resultDir, result.ID+".json")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, content, 0o644); err != nil {
-		logx.Errorf("写入执行结果失败: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		logx.Errorf("写入执行结果失败: %v", err)
-		return
+	if err := atomicJSON(filepath.Join(e.resultDir, result.ID+".json"), result); err != nil {
+		return err
 	}
 	e.pruneResults()
+	return nil
 }
 
 // pruneResults 只保留最近 resultKeep 条结果。
@@ -575,6 +672,14 @@ func (e *Executor) pruneResults() {
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].finishedAt.After(items[j].finishedAt) })
 	for _, old := range items[resultKeep:] {
+		id := strings.TrimSuffix(old.name, ".json")
+		// Never resurrect an active lifecycle by pruning its final result.
+		if _, err := os.Stat(filepath.Join(e.queueDir, old.name+claimSuffix)); err == nil {
+			continue
+		}
+		if err := os.Remove(e.lifecyclePath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		_ = os.Remove(filepath.Join(e.resultDir, old.name))
 	}
 }
