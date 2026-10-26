@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/onlyLTY/dockerCopilot/internal/config"
 	"github.com/onlyLTY/dockerCopilot/internal/handler"
@@ -138,6 +139,19 @@ export const customImageLogos = {
 	logx.Info("程序版本" + config.Version)
 	server.Start()
 }
+
+// serveFrontIndex 将内嵌的 index.html 以 SPA 深链回退方式输出。
+func serveFrontIndex(w http.ResponseWriter, r *http.Request, frontFS fs.FS) {
+	index, err := fs.ReadFile(frontFS, "index.html")
+	if err != nil {
+		http.Error(w, "front index unavailable", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(index)
+}
+
 func RegisterHandlers(engine *rest.Server) {
 	frontFS, err := fs.Sub(embeddedFront, "front")
 	if err != nil {
@@ -174,7 +188,13 @@ func RegisterHandlers(engine *rest.Server) {
 			{
 				Method: http.MethodGet,
 				Path:   "/manager/:path",
+				// SPA 深链回退：/manager/compose 这类无后缀路径不存在对应文件时，
+				// 回退 index.html 让前端接管路由；带后缀的资源仍按文件处理（缺失返回 404）。
 				Handler: func(w http.ResponseWriter, r *http.Request) {
+					if !strings.Contains(r.URL.Path, ".") {
+						serveFrontIndex(w, r, frontFS)
+						return
+					}
 					frontFileServer.ServeHTTP(w, r)
 				},
 			},
