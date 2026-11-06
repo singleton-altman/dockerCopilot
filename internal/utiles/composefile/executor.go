@@ -117,6 +117,8 @@ type Executor struct {
 	maxOutput int
 	// composeCmd 探测到的 compose 调用方式，如 ["docker","compose"] 或 ["/app/bin/docker-compose"]
 	composeCmd []string
+	// hostProjectDir stacks 目录在宿主机上的真实路径，用于改写相对挂载源；为空表示未知
+	hostProjectDir string
 	// runner 执行单个任务，测试时可替换。
 	runner func(ctx context.Context, job Job) JobResult
 	// docker 用于精确识别容器归属；为 nil 时跳过孤儿清理（宁可留孤儿也不误删）。
@@ -146,6 +148,13 @@ func NewExecutor(workDir string) *Executor {
 func (e *Executor) WithDockerClient(cli *client.Client) *Executor {
 	e.docker = cli
 	return e
+}
+
+// SetHostProjectDir 设置 stacks 目录的宿主机真实路径（进程启动时探测一次）。
+// 设置后执行前会把 compose 里相对路径的 bind 挂载源改写为宿主机绝对路径，
+// 避免 daemon 在宿主机错误位置创建目录。空串表示未知，保持原行为。
+func (e *Executor) SetHostProjectDir(p string) {
+	e.hostProjectDir = p
 }
 
 func (e *Executor) ensureDirs() error {
@@ -480,6 +489,42 @@ func (e *Executor) finishClaim(claimPath string, result JobResult) {
 	_ = os.Remove(e.lifecyclePath(result.ID))
 }
 
+// prepareExecFile 在探测到宿主机 stacks 路径时，把 compose 文件里相对路径的
+// bind 挂载源改写为宿主机绝对路径，写入系统临时文件供本次执行。
+// 返回执行用文件路径与清理函数；未探测到路径、无需改写或出错时按原文执行。
+func (e *Executor) prepareExecFile(filename string) (string, func(), error) {
+	noop := func() {}
+	if e.hostProjectDir == "" {
+		return filepath.Join(e.workDir, filename), noop, nil
+	}
+	content, err := os.ReadFile(filepath.Join(e.workDir, filename))
+	if err != nil {
+		return filepath.Join(e.workDir, filename), noop, err
+	}
+	rewritten, changed, err := RewriteRelativeVolumes(string(content), e.hostProjectDir)
+	if err != nil {
+		return filepath.Join(e.workDir, filename), noop, err
+	}
+	if !changed {
+		return filepath.Join(e.workDir, filename), noop, nil
+	}
+	tmp, err := os.CreateTemp("", "dc-exec-*.yml")
+	if err != nil {
+		return filepath.Join(e.workDir, filename), noop, err
+	}
+	if _, err := tmp.WriteString(rewritten); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return filepath.Join(e.workDir, filename), noop, err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return filepath.Join(e.workDir, filename), noop, err
+	}
+	logx.Infof("已按宿主机目录 %s 改写相对挂载: %s", e.hostProjectDir, filename)
+	return tmp.Name(), func() { os.Remove(tmp.Name()) }, nil
+}
+
 // runCompose 通过容器内的 docker CLI 执行 compose 命令，
 // daemon 是挂载进容器的宿主机 docker.sock，效果等同于在宿主机上执行。
 func (e *Executor) runCompose(ctx context.Context, job Job) JobResult {
@@ -496,7 +541,14 @@ func (e *Executor) runCompose(ctx context.Context, job Job) JobResult {
 
 	// composeCmd[0] 是二进制本体，由 exec.Command 的 path 参数承担，args 从子命令开始
 	args := append([]string{}, e.composeCmd[1:]...)
-	args = append(args, "-f", filepath.Join(e.workDir, job.Filename),
+	// 相对路径挂载按宿主机目录改写（临时文件），project-directory 仍指向容器内 stacks，
+	// .env / env_file 等相对语义不变
+	execFile, cleanup, rerr := e.prepareExecFile(job.Filename)
+	if rerr != nil {
+		logx.Errorf("相对挂载改写失败，按原文执行: %v", rerr)
+	}
+	defer cleanup()
+	args = append(args, "-f", execFile,
 		"--project-directory", e.workDir)
 	switch job.Action {
 	case ActionUp:

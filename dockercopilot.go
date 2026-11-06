@@ -80,6 +80,13 @@ func main() {
 	// 启动内置 compose 执行器：消费 .queue 里的执行请求，
 	// 容器内通过挂载的 docker.sock 执行，无需宿主机侧 watcher
 	if c.Compose.BuiltinExecutor {
+		// 探测 stacks 目录的宿主机真实路径，用于把相对挂载改写为宿主机绝对路径
+		if hostDir := utiles.DetectHostComposeDir(ctx); hostDir != "" {
+			logx.Infof("compose 目录宿主机路径: %s", hostDir)
+			ctx.ComposeExecutor.SetHostProjectDir(hostDir)
+		} else {
+			logx.Info("未探测到 compose 目录的宿主机路径，相对挂载将按容器内路径解析")
+		}
 		ctx.ComposeExecutor.Start(context.Background())
 	}
 
