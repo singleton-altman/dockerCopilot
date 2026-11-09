@@ -97,6 +97,10 @@ func main() {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		logx.Errorf("Failed to create data directory: %v", err)
 	}
+	// 备份目录自动创建：全新安装时备份管理页直接可用，无需先手动创建一次备份
+	if err := os.MkdirAll(utiles.BackupDir(), 0755); err != nil {
+		logx.Errorf("Failed to create backup directory: %v", err)
+	}
 
 	imageLogosPath := "/data/config/imageLogos.js"
 	if _, err := os.Stat(imageLogosPath); os.IsNotExist(err) {

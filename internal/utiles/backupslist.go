@@ -1,19 +1,22 @@
 package utiles
 
 import (
-	"github.com/onlyLTY/dockerCopilot/internal/svc"
 	"os"
 	"path/filepath"
+
+	"github.com/onlyLTY/dockerCopilot/internal/svc"
 )
 
 func BackupList(ctx *svc.ServiceContext) ([]string, error) {
 	var backupList []string
-	dir := os.Getenv("BACKUP_DIR") // 从环境变量中获取备份目录
-	if dir == "" {
-		dir = "/data/backups" // 如果环境变量未设置，使用默认值
-	}
+	dir := BackupDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// 全新安装还没有备份目录：视为空列表，
+			// 而不是把 "open /data/backups: no such file or directory" 抛给页面
+			return backupList, nil
+		}
 		return nil, err
 	}
 	for _, entry := range entries {
