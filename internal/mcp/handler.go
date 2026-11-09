@@ -18,17 +18,18 @@ import (
 type Handler struct {
 	svcCtx   *svc.ServiceContext
 	registry *Registry
-	secret   string
+	manager  *Manager
 	version  string
 	maxBody  int64
 }
 
-// NewHandler 创建 MCP 端点。secret 为空时拒绝所有请求（安全默认）。
-func NewHandler(svcCtx *svc.ServiceContext, secret, version string) *Handler {
+// NewHandler 创建 MCP 端点。开关与密钥从 manager 运行时读取，
+// 未启用或密钥为空时拒绝所有请求（安全默认），配置修改热生效无需重启。
+func NewHandler(svcCtx *svc.ServiceContext, manager *Manager, version string) *Handler {
 	return &Handler{
 		svcCtx:   svcCtx,
 		registry: NewRegistry(svcCtx),
-		secret:   secret,
+		manager:  manager,
 		version:  version,
 		// 写 compose 文件可能带上完整 YAML，4 MiB 足够且限制滥用。
 		maxBody: 4 << 20,
@@ -37,6 +38,11 @@ func NewHandler(svcCtx *svc.ServiceContext, secret, version string) *Handler {
 
 // ServeHTTP 处理 POST /mcp。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !h.manager.Enabled() {
+		// 端点固定注册，关闭时以 404 表达"服务不存在"。
+		http.Error(w, "MCP service disabled", http.StatusNotFound)
+		return
+	}
 	if !h.authorized(r) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="docker-copilot-mcp"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -59,7 +65,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // authorized 校验 Bearer 密钥。用常量时间比较，避免时序侧信道。
 func (h *Handler) authorized(r *http.Request) bool {
-	if h.secret == "" {
+	secret := h.manager.AccessKey()
+	if secret == "" {
 		return false
 	}
 	header := r.Header.Get("Authorization")
@@ -71,7 +78,7 @@ func (h *Handler) authorized(r *http.Request) bool {
 	if token == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(h.secret)) == 1
+	return subtle.ConstantTimeCompare([]byte(token), []byte(secret)) == 1
 }
 
 func (h *Handler) handlePost(w http.ResponseWriter, r *http.Request) {

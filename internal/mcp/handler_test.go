@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,8 +17,9 @@ import (
 
 func newTestServer(t *testing.T, secret string) *httptest.Server {
 	t.Helper()
+	// path 置空：不落盘，密钥经环境变量初始值注入
 	svcCtx := &svc.ServiceContext{}
-	h := NewHandler(svcCtx, secret, "test-version")
+	h := NewHandler(svcCtx, NewManager("", "true", secret), "test-version")
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", h)
 	return httptest.NewServer(mux)
@@ -68,11 +70,50 @@ func TestUnauthorizedWithWrongSecret(t *testing.T) {
 	}
 }
 
-func TestEmptySecretRejectsAll(t *testing.T) {
+func TestDisabledManagerReturnsNotFound(t *testing.T) {
 	server := newTestServer(t, "")
+	// 密钥为空时 Manager 强制关闭，端点以 404 表达服务不存在
 	resp, _ := post(t, server, "anything", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	if resp.StatusCode != http.StatusUnauthorized {
+	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status: %d", resp.StatusCode)
+	}
+}
+
+func TestConfigHotReload(t *testing.T) {
+	manager := NewManager(filepath.Join(t.TempDir(), "mcp.json"), "true", "old-secret-123")
+	h := NewHandler(&svc.ServiceContext{}, manager, "test-version")
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", h)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+
+	// 初始可用
+	resp, _ := post(t, server, "old-secret-123", body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initial status: %d", resp.StatusCode)
+	}
+
+	// 换密钥热生效：旧密钥 401、新密钥 200，无需重建 server
+	if err := manager.Update(true, "new-secret-456"); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ = post(t, server, "old-secret-123", body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old key after rotate: %d", resp.StatusCode)
+	}
+	resp, _ = post(t, server, "new-secret-456", body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("new key after rotate: %d", resp.StatusCode)
+	}
+
+	// 关闭后 404
+	if err := manager.Update(false, ""); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ = post(t, server, "new-secret-456", body)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("after disable: %d", resp.StatusCode)
 	}
 }
 

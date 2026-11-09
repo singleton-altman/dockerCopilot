@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -164,21 +165,36 @@ export const customImageLogos = {
 		}()
 	}
 	RegisterHandlers(server, logoShare)
-	// MCP 服务：默认关闭；MCP_ENABLED=true 且注入 MCP_ACCESS_KEY 后开放 /mcp 端点，
-	// 供 AI 客户端（Claude Desktop 等）读取与操作容器和 compose。
-	if os.Getenv(config.EnvMCPEnabled) == "true" {
-		accessKey := os.Getenv(config.MCPAccessKeyEnvName())
-		if accessKey == "" {
-			logx.Errorf("MCP_ENABLED=true 但未设置 %s，MCP 端点保持关闭", config.MCPAccessKeyEnvName())
-		} else {
-			mcpHandler := mcp.NewHandler(ctx, accessKey, config.Version)
-			server.AddRoute(rest.Route{
-				Method:  http.MethodPost,
-				Path:    "/mcp",
-				Handler: mcpHandler.ServeHTTP,
-			})
-			logx.Infof("MCP 服务已启用: POST /mcp")
-		}
+	// MCP 服务：端点常驻注册，开关与密钥运行时读取（热生效，无需重启），
+	// 可在 Web/App 设置里修改并持久化到 /data/config/mcp-config.json。
+	// 环境变量 MCP_ENABLED / MCP_ACCESS_KEY 仅作为首次启动的初始值。
+	mcpManager := mcp.NewManager(
+		filepath.Join(ctx.Config.ReleaseWatchDataDir(), "mcp-config.json"),
+		os.Getenv(config.EnvMCPEnabled),
+		os.Getenv(config.MCPAccessKeyEnvName()),
+	)
+	server.AddRoute(rest.Route{
+		Method:  http.MethodPost,
+		Path:    "/mcp",
+		Handler: mcp.NewHandler(ctx, mcpManager, config.Version).ServeHTTP,
+	})
+	configAPI := mcp.NewConfigAPI(mcpManager)
+	server.AddRoutes([]rest.Route{
+		{
+			Method:  http.MethodGet,
+			Path:    "/mcp/config",
+			Handler: configAPI.GetHandler(),
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/mcp/config",
+			Handler: configAPI.UpdateHandler(),
+		},
+	}, rest.WithJwt(ctx.Config.Auth.AccessSecret), rest.WithPrefix("/api"))
+	if mcpManager.Enabled() {
+		logx.Info("MCP 服务已启用: POST /mcp（配置接口 GET/POST /api/mcp/config）")
+	} else {
+		logx.Info("MCP 服务未启用，可在 Web/App 设置中开启")
 	}
 	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
 	logx.Info("程序版本" + config.Version)
