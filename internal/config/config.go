@@ -16,7 +16,15 @@ const (
 	EnvComposeBuiltinExecutor = "COMPOSE_BUILTIN_EXECUTOR"
 	// DefaultComposeBuiltinExecutor 内置执行器缺省值，默认启用
 	DefaultComposeBuiltinExecutor = "true"
+	// EnvMCPEnabled MCP 服务开关（"true" 开启，默认关闭）
+	EnvMCPEnabled = "MCP_ENABLED"
+	// DefaultMCPEnabled MCP 默认关闭：开放写操作需部署方显式开启
+	DefaultMCPEnabled = "false"
 )
+
+// MCPAccessKeyEnvName MCP 访问密钥的环境变量名。
+// 源码不含任何密钥值，部署时注入；未注入时 MCP 端点拒绝全部请求。
+func MCPAccessKeyEnvName() string { return "MCP_ACCESS_KEY" }
 
 // ApplyEnvDefaults 给 yaml 模板引用了但用户未设置的环境变量补默认值。
 // go-zero 的 UseEnv 把缺失变量展开成空字符串，int 字段会 type mismatch 导致启动失败。
@@ -26,6 +34,9 @@ func ApplyEnvDefaults() {
 	}
 	if os.Getenv(EnvComposeBuiltinExecutor) == "" {
 		os.Setenv(EnvComposeBuiltinExecutor, DefaultComposeBuiltinExecutor)
+	}
+	if os.Getenv(EnvMCPEnabled) == "" {
+		os.Setenv(EnvMCPEnabled, DefaultMCPEnabled)
 	}
 }
 

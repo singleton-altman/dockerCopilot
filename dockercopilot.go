@@ -16,6 +16,7 @@ import (
 
 	"github.com/onlyLTY/dockerCopilot/internal/config"
 	"github.com/onlyLTY/dockerCopilot/internal/handler"
+	"github.com/onlyLTY/dockerCopilot/internal/mcp"
 	"github.com/onlyLTY/dockerCopilot/internal/svc"
 	"github.com/onlyLTY/dockerCopilot/internal/utiles"
 	"github.com/onlyLTY/dockerCopilot/internal/utiles/logoshare"
@@ -163,6 +164,22 @@ export const customImageLogos = {
 		}()
 	}
 	RegisterHandlers(server, logoShare)
+	// MCP 服务：默认关闭；MCP_ENABLED=true 且注入 MCP_ACCESS_KEY 后开放 /mcp 端点，
+	// 供 AI 客户端（Claude Desktop 等）读取与操作容器和 compose。
+	if os.Getenv(config.EnvMCPEnabled) == "true" {
+		accessKey := os.Getenv(config.MCPAccessKeyEnvName())
+		if accessKey == "" {
+			logx.Errorf("MCP_ENABLED=true 但未设置 %s，MCP 端点保持关闭", config.MCPAccessKeyEnvName())
+		} else {
+			mcpHandler := mcp.NewHandler(ctx, accessKey, config.Version)
+			server.AddRoute(rest.Route{
+				Method:  http.MethodPost,
+				Path:    "/mcp",
+				Handler: mcpHandler.ServeHTTP,
+			})
+			logx.Infof("MCP 服务已启用: POST /mcp")
+		}
+	}
 	fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
 	logx.Info("程序版本" + config.Version)
 	server.Start()
