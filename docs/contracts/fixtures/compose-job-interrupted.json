@@ -1,0 +1,28 @@
+{
+  "done": true,
+  "status": "interrupted",
+  "job": {
+    "id": "job-interrupted",
+    "filename": "web.yaml",
+    "action": "deploy",
+    "status": "interrupted",
+    "createdAt": "2026-11-11T08:00:00Z",
+    "startedAt": "2026-11-11T08:00:01Z",
+    "updatedAt": "2026-11-11T08:01:00Z",
+    "configSha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "result": {
+      "id": "job-interrupted",
+      "filename": "web.yaml",
+      "action": "deploy",
+      "success": false,
+      "status": "interrupted",
+      "output": "结果不确定，需要核验",
+      "configSha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "createdAt": "2026-11-11T08:00:00Z",
+      "startedAt": "2026-11-11T08:00:01Z",
+      "finishedAt": "2026-11-11T08:01:00Z",
+      "steps": [],
+      "services": []
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "results": [
+    {
+      "id": "legacy-job",
+      "filename": "web.yaml",
+      "action": "restart",
+      "success": true,
+      "output": "restarted",
+      "finishedAt": "2026-11-10T12:00:02Z"
+    }
+  ]
+}
