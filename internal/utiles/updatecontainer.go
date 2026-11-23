@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
@@ -20,6 +21,53 @@ import (
 )
 
 var ErrUpdateInProgress = errors.New("该容器正在更新中")
+
+const (
+	// updateHealthWindow 新容器启动后的存活确认窗口；指数退避时不阻塞太久。
+	updateHealthWindow = 12 * time.Second
+	// updateHealthTick 存活确认的轮询间隔。
+	updateHealthTick = 2 * time.Second
+)
+
+// awaitContainerHealthy 在窗口内轮询新容器状态，确认它持续运行。
+// 容器不在运行（exited/dead/removed）时立即失败；窗口结束时仍在运行视为通过。
+// inspect 查询失败不立即放弃（daemon 短暂无响应不应触发回滚），直到窗口耗尽。
+func awaitContainerHealthy(ctx context.Context, cli containerAPI, id string, window, tick time.Duration) error {
+	deadline := time.Now().Add(window)
+	var lastErr error
+	for {
+		inspected, err := cli.ContainerInspect(ctx, id)
+		if err != nil {
+			lastErr = err
+		} else {
+			// 成功确认一次运行即清除此前的瞬时查询错误，避免窗口结束时误判回滚。
+			lastErr = nil
+		}
+		if err == nil && (inspected.State == nil || !inspected.State.Running) {
+			state := "unknown"
+			if inspected.State != nil {
+				state = inspected.State.Status
+			}
+			return fmt.Errorf("新容器未保持运行 (state=%s)", state)
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("存活确认期间无法查询容器状态: %w", lastErr)
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(tick):
+		}
+	}
+}
+
+// containerAPI 存活确认所需的最小 Docker 只读接口，便于测试注入。
+type containerAPI interface {
+	ContainerInspect(ctx context.Context, id string) (types.ContainerJSON, error)
+}
 
 // ResolveRecordName 把路径参数解析成记录键（容器名）。
 // 客户端可能传容器 ID，此时通过 inspect 取回名称，兼容两种调用方式。
@@ -204,6 +252,16 @@ func UpdateContainer(serviceContext *svc.ServiceContext, rec *module.ContainerUp
 	setPhase(serviceContext, rec, module.PhaseStarted, "正在启动新容器", 80)
 	if err := cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
 		return failWithRestore(serviceContext, rec, renamedTo, "启动新容器失败", err)
+	}
+
+	// 5.5 存活确认：ContainerStart 成功只代表进程被创建，不代表服务可用。
+	// 端口冲突、启动阶段 panic 等会让容器在几秒内退出；此时若已删除旧容器，
+	// 服务会彻底下线（nas 上多次踩到）。等待一个短窗口确认容器仍在运行，
+	// 失败则清理新容器并恢复旧容器，保证服务不中断。
+	if err := awaitContainerHealthy(ctx, cli, created.ID, updateHealthWindow, updateHealthTick); err != nil {
+		// 清理启动失败的新容器，再恢复旧容器
+		_ = cli.ContainerRemove(context.Background(), created.ID, container.RemoveOptions{Force: true})
+		return failWithRestore(serviceContext, rec, renamedTo, "新容器启动后退出，已回滚到旧容器", err)
 	}
 
 	// 6. 完成：按 DelOldContainer 决定旧容器去留
