@@ -36,6 +36,18 @@ func (l *Logic) List() (resp *types.Resp, err error) {
 		resp.Data = map[string]interface{}{}
 		return resp, err
 	}
+	// 附加每个 compose 文件对应的服务运行状态（一次 Docker 查询，失败降级不报错）
+	statuses := l.svcCtx.ComposeExecutor.CollectFileStatuses(l.ctx)
+	if statuses != nil {
+		for i := range items {
+			if status, ok := statuses[items[i].Name]; ok {
+				items[i].Services = status.Services
+				items[i].Running = status.Running
+				items[i].Healthy = status.Healthy
+			}
+		}
+	}
+
 	resp.Code = 200
 	resp.Msg = "success"
 	resp.Data = map[string]interface{}{

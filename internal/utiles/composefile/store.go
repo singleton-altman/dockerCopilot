@@ -44,6 +44,10 @@ type FileInfo struct {
 	UpdatedAt string `json:"updatedAt"`
 	// IsEnv 标记该文件是 dotenv 变量文件而非 compose 配置
 	IsEnv bool `json:"isEnv,omitempty"`
+	// 以下字段由 List API 附加：compose 文件创建的容器运行状态（Docker 不可用时省略）。
+	Services []ServiceBrief `json:"services,omitempty"`
+	Running  bool           `json:"running,omitempty"`
+	Healthy  bool           `json:"healthy,omitempty"`
 }
 
 // Version 一次保存的版本快照
